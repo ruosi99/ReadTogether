@@ -19,22 +19,59 @@ const state = {
   touchStart: null,
   selectionCaptureTimer: null,
   selectionListenersBound: false,
+  lastRouteHash: "",
 };
 
 const userSwitcher = document.getElementById("user-switcher");
 const app = document.getElementById("app");
 
 bootstrap();
-window.addEventListener("hashchange", render);
+window.addEventListener("hashchange", safeRender);
+window.addEventListener("popstate", safeRender);
 window.addEventListener("resize", handleViewportResize);
+window.setInterval(watchRouteChanges, 250);
 
 async function bootstrap() {
   const bootstrapData = await api("/api/bootstrap");
   state.users = bootstrapData.users;
   state.books = bootstrapData.books;
   renderUserSwitcher();
-  render();
+  state.lastRouteHash = window.location.hash || "#/";
+  safeRender();
   startEventLoop();
+}
+
+function safeRender() {
+  render().catch((error) => {
+    console.error(error);
+    app.innerHTML = `
+      <section class="page-grid">
+        <div class="empty-card">
+          <h3>打开阅读页时出了点问题</h3>
+          <p>${escapeHtml(error?.message || "未知错误")}</p>
+          <button class="primary-button" id="retry-render">重新进入</button>
+        </div>
+      </section>
+    `;
+    document.getElementById("retry-render")?.addEventListener("click", () => safeRender());
+  });
+}
+
+function watchRouteChanges() {
+  const nextHash = window.location.hash || "#/";
+  if (nextHash !== state.lastRouteHash) {
+    state.lastRouteHash = nextHash;
+    safeRender();
+  }
+}
+
+function navigateTo(hash) {
+  const normalized = hash.startsWith("#") ? hash : `#${hash}`;
+  if (window.location.hash !== normalized) {
+    window.location.hash = normalized;
+  }
+  state.lastRouteHash = normalized;
+  safeRender();
 }
 
 function activeUser() {
@@ -174,16 +211,7 @@ async function renderDetail(bookId) {
   readLink.href = readHref;
   readLink.addEventListener("click", (event) => {
     event.preventDefault();
-    if (window.location.hash === readHref) {
-      render();
-      return;
-    }
-    window.location.hash = readHref;
-    setTimeout(() => {
-      if (route().name !== "reader") {
-        render();
-      }
-    }, 0);
+    navigateTo(readHref);
   });
   document.getElementById("detail-uploaded-at").textContent = `上传时间：${formatTime(state.currentBook.uploadedAt)}`;
 
@@ -760,7 +788,7 @@ async function uploadBook(event) {
       throw new Error(payload.error || "上传失败");
     }
     state.books = [payload.book, ...state.books.filter((book) => book.id !== payload.book.id)];
-    window.location.hash = `#/books/${payload.book.id}`;
+    navigateTo(`#/books/${payload.book.id}`);
   } catch (error) {
     alert(error.message);
   } finally {
