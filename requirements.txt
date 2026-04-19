@@ -1,1 +1,2 @@
-psycopg[binary]>=3.2,<4
+# SQLite deployment has no mandatory third-party Python dependencies.
+# For Postgres deployment, install requirements-postgres.txt as well.

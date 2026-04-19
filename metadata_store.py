@@ -38,6 +38,8 @@ class MetadataStore(Protocol):
 
     def upsert_progress(self, payload: dict[str, Any]) -> dict[str, Any]: ...
 
+    def create_highlight(self, payload: dict[str, Any]) -> dict[str, Any]: ...
+
     def create_annotation(self, payload: dict[str, Any]) -> dict[str, Any]: ...
 
     def create_comment(self, payload: dict[str, Any]) -> dict[str, Any]: ...
@@ -418,7 +420,7 @@ class SqliteMetadataStore:
             (book_id,),
         ).fetchall()
         annotation_count = connection.execute(
-            "SELECT COUNT(*) AS count FROM annotations WHERE book_id = ?",
+            "SELECT COUNT(*) AS count FROM highlights WHERE book_id = ?",
             (book_id,),
         ).fetchone()["count"]
         chapter_count = connection.execute(
@@ -493,13 +495,13 @@ class SqliteMetadataStore:
 
     def get_threads(self, book_id: str) -> list[dict[str, Any]]:
         with self.connect() as connection:
-            annotation_rows = connection.execute(
-                "SELECT * FROM annotations WHERE book_id = ? ORDER BY created_at DESC",
+            highlight_rows = connection.execute(
+                "SELECT * FROM highlights WHERE book_id = ? ORDER BY created_at DESC",
                 (book_id,),
             ).fetchall()
-            highlights = {
-                row["id"]: row
-                for row in connection.execute("SELECT * FROM highlights WHERE book_id = ?", (book_id,)).fetchall()
+            annotations_by_highlight = {
+                row["highlight_id"]: row
+                for row in connection.execute("SELECT * FROM annotations WHERE book_id = ? ORDER BY created_at DESC", (book_id,)).fetchall()
             }
             comments_by_annotation: dict[str, list[dict[str, Any]]] = {}
             for comment in connection.execute(
@@ -509,15 +511,13 @@ class SqliteMetadataStore:
                 comments_by_annotation.setdefault(comment["annotation_id"], []).append(db_to_api(dict(comment)))
 
             threads = []
-            for annotation in annotation_rows:
-                highlight = highlights.get(annotation["highlight_id"])
-                if not highlight:
-                    continue
+            for highlight in highlight_rows:
+                annotation = annotations_by_highlight.get(highlight["id"])
                 threads.append(
                     {
-                        "annotation": db_to_api(dict(annotation)),
                         "highlight": db_to_api(dict(highlight)),
-                        "comments": comments_by_annotation.get(annotation["id"], []),
+                        "annotation": db_to_api(dict(annotation)) if annotation else None,
+                        "comments": comments_by_annotation.get(annotation["id"], []) if annotation else [],
                     }
                 )
             return threads
@@ -566,12 +566,10 @@ class SqliteMetadataStore:
                 "updatedAt": row["updated_at"],
             }
 
-    def create_annotation(self, payload: dict[str, Any]) -> dict[str, Any]:
-        highlight_id = make_id("highlight")
-        annotation_id = make_id("annotation")
+    def create_highlight(self, payload: dict[str, Any]) -> dict[str, Any]:
         created_at = iso_now()
         highlight = {
-            "id": highlight_id,
+            "id": make_id("highlight"),
             "book_id": payload["bookId"],
             "user_id": payload["userId"],
             "chapter_index": int(payload["chapterIndex"]),
@@ -579,14 +577,6 @@ class SqliteMetadataStore:
             "end_offset": int(payload["endOffset"]),
             "quote": payload["quote"],
             "color": payload["color"],
-            "created_at": created_at,
-        }
-        annotation = {
-            "id": annotation_id,
-            "highlight_id": highlight_id,
-            "book_id": payload["bookId"],
-            "user_id": payload["userId"],
-            "body": payload["body"],
             "created_at": created_at,
         }
         with self.connect() as connection:
@@ -597,6 +587,57 @@ class SqliteMetadataStore:
                 """,
                 highlight,
             )
+        return {"highlight": db_to_api(highlight), "annotation": None, "comments": [], "createdHighlight": True}
+
+    def create_annotation(self, payload: dict[str, Any]) -> dict[str, Any]:
+        annotation_id = make_id("annotation")
+        created_at = iso_now()
+        with self.connect() as connection:
+            created_highlight = False
+            highlight_id = payload.get("highlightId")
+            if highlight_id:
+                highlight_row = connection.execute(
+                    "SELECT * FROM highlights WHERE id = ? AND book_id = ?",
+                    (highlight_id, payload["bookId"]),
+                ).fetchone()
+                if highlight_row is None:
+                    raise KeyError(highlight_id)
+                existing_annotation = connection.execute(
+                    "SELECT id FROM annotations WHERE highlight_id = ?",
+                    (highlight_id,),
+                ).fetchone()
+                if existing_annotation is not None:
+                    raise ValueError("This highlight already has a note.")
+                highlight = dict(highlight_row)
+            else:
+                created_highlight = True
+                highlight = {
+                    "id": make_id("highlight"),
+                    "book_id": payload["bookId"],
+                    "user_id": payload["userId"],
+                    "chapter_index": int(payload["chapterIndex"]),
+                    "start_offset": int(payload["startOffset"]),
+                    "end_offset": int(payload["endOffset"]),
+                    "quote": payload["quote"],
+                    "color": payload["color"],
+                    "created_at": created_at,
+                }
+                connection.execute(
+                    """
+                    INSERT INTO highlights (id, book_id, user_id, chapter_index, start_offset, end_offset, quote, color, created_at)
+                    VALUES (:id, :book_id, :user_id, :chapter_index, :start_offset, :end_offset, :quote, :color, :created_at)
+                    """,
+                    highlight,
+                )
+                highlight_id = highlight["id"]
+            annotation = {
+                "id": annotation_id,
+                "highlight_id": highlight_id,
+                "book_id": payload["bookId"],
+                "user_id": payload["userId"],
+                "body": payload["body"],
+                "created_at": created_at,
+            }
             connection.execute(
                 """
                 INSERT INTO annotations (id, highlight_id, book_id, user_id, body, created_at)
@@ -608,6 +649,7 @@ class SqliteMetadataStore:
             "highlight": db_to_api(highlight),
             "annotation": db_to_api(annotation),
             "comments": [],
+            "createdHighlight": created_highlight,
         }
 
     def create_comment(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -631,7 +673,9 @@ class SqliteMetadataStore:
 
     def export_notes(self, book_id: str, user_id: str, users: dict[str, dict[str, Any]]) -> str:
         book = self.get_book_detail(book_id)
-        threads = [thread for thread in self.get_threads(book_id) if thread["annotation"]["userId"] == user_id]
+        threads = [
+            thread for thread in self.get_threads(book_id) if thread["annotation"] and thread["annotation"]["userId"] == user_id
+        ]
         lines = [
             f"# {book['title']} - {users[user_id]['name']}的笔记",
             "",
@@ -819,7 +863,7 @@ class PostgresMetadataStore:
         )
         annotation_count = self._fetchone_connection(
             connection,
-            "SELECT COUNT(*) AS count FROM annotations WHERE book_id = %s",
+            "SELECT COUNT(*) AS count FROM highlights WHERE book_id = %s",
             (book_id,),
         )["count"]
         chapter_count = self._fetchone_connection(
@@ -889,16 +933,16 @@ class PostgresMetadataStore:
 
     def get_threads(self, book_id: str) -> list[dict[str, Any]]:
         with self.connect() as connection:
-            annotation_rows = self._fetchall_connection(
+            highlight_rows = self._fetchall_connection(
                 connection,
-                "SELECT * FROM annotations WHERE book_id = %s ORDER BY created_at DESC",
+                "SELECT * FROM highlights WHERE book_id = %s ORDER BY created_at DESC",
                 (book_id,),
             )
-            highlights = {
-                row["id"]: row
+            annotations_by_highlight = {
+                row["highlight_id"]: row
                 for row in self._fetchall_connection(
                     connection,
-                    "SELECT * FROM highlights WHERE book_id = %s",
+                    "SELECT * FROM annotations WHERE book_id = %s ORDER BY created_at DESC",
                     (book_id,),
                 )
             }
@@ -910,15 +954,13 @@ class PostgresMetadataStore:
             ):
                 comments_by_annotation.setdefault(comment["annotation_id"], []).append(db_to_api(dict(comment)))
             threads = []
-            for annotation in annotation_rows:
-                highlight = highlights.get(annotation["highlight_id"])
-                if not highlight:
-                    continue
+            for highlight in highlight_rows:
+                annotation = annotations_by_highlight.get(highlight["id"])
                 threads.append(
                     {
-                        "annotation": db_to_api(dict(annotation)),
                         "highlight": db_to_api(dict(highlight)),
-                        "comments": comments_by_annotation.get(annotation["id"], []),
+                        "annotation": db_to_api(dict(annotation)) if annotation else None,
+                        "comments": comments_by_annotation.get(annotation["id"], []) if annotation else [],
                     }
                 )
             return threads
@@ -972,12 +1014,10 @@ class PostgresMetadataStore:
             "updatedAt": row["updated_at"],
         }
 
-    def create_annotation(self, payload: dict[str, Any]) -> dict[str, Any]:
-        highlight_id = make_id("highlight")
-        annotation_id = make_id("annotation")
+    def create_highlight(self, payload: dict[str, Any]) -> dict[str, Any]:
         created_at = iso_now()
         highlight = {
-            "id": highlight_id,
+            "id": make_id("highlight"),
             "book_id": payload["bookId"],
             "user_id": payload["userId"],
             "chapter_index": int(payload["chapterIndex"]),
@@ -985,14 +1025,6 @@ class PostgresMetadataStore:
             "end_offset": int(payload["endOffset"]),
             "quote": payload["quote"],
             "color": payload["color"],
-            "created_at": created_at,
-        }
-        annotation = {
-            "id": annotation_id,
-            "highlight_id": highlight_id,
-            "book_id": payload["bookId"],
-            "user_id": payload["userId"],
-            "body": payload["body"],
             "created_at": created_at,
         }
         with self.connect() as connection:
@@ -1006,6 +1038,62 @@ class PostgresMetadataStore:
                     """,
                     tuple(highlight.values()),
                 )
+            connection.commit()
+        return {"highlight": db_to_api(highlight), "annotation": None, "comments": [], "createdHighlight": True}
+
+    def create_annotation(self, payload: dict[str, Any]) -> dict[str, Any]:
+        annotation_id = make_id("annotation")
+        created_at = iso_now()
+        with self.connect() as connection:
+            with connection.cursor() as cursor:
+                if self.schema:
+                    cursor.execute(f"SET search_path TO {self.schema}")
+                created_highlight = False
+                highlight_id = payload.get("highlightId")
+                if highlight_id:
+                    highlight = self._fetchone_cursor(
+                        cursor,
+                        "SELECT * FROM highlights WHERE id = %s AND book_id = %s",
+                        (highlight_id, payload["bookId"]),
+                    )
+                    if highlight is None:
+                        raise KeyError(highlight_id)
+                    existing_annotation = self._fetchone_cursor(
+                        cursor,
+                        "SELECT id FROM annotations WHERE highlight_id = %s",
+                        (highlight_id,),
+                    )
+                    if existing_annotation is not None:
+                        raise ValueError("This highlight already has a note.")
+                else:
+                    created_highlight = True
+                    highlight = {
+                        "id": make_id("highlight"),
+                        "book_id": payload["bookId"],
+                        "user_id": payload["userId"],
+                        "chapter_index": int(payload["chapterIndex"]),
+                        "start_offset": int(payload["startOffset"]),
+                        "end_offset": int(payload["endOffset"]),
+                        "quote": payload["quote"],
+                        "color": payload["color"],
+                        "created_at": created_at,
+                    }
+                    cursor.execute(
+                        """
+                        INSERT INTO highlights (id, book_id, user_id, chapter_index, start_offset, end_offset, quote, color, created_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        tuple(highlight.values()),
+                    )
+                    highlight_id = highlight["id"]
+                annotation = {
+                    "id": annotation_id,
+                    "highlight_id": highlight_id,
+                    "book_id": payload["bookId"],
+                    "user_id": payload["userId"],
+                    "body": payload["body"],
+                    "created_at": created_at,
+                }
                 cursor.execute(
                     """
                     INSERT INTO annotations (id, highlight_id, book_id, user_id, body, created_at)
@@ -1014,7 +1102,12 @@ class PostgresMetadataStore:
                     tuple(annotation.values()),
                 )
             connection.commit()
-        return {"highlight": db_to_api(highlight), "annotation": db_to_api(annotation), "comments": []}
+        return {
+            "highlight": db_to_api(highlight),
+            "annotation": db_to_api(annotation),
+            "comments": [],
+            "createdHighlight": created_highlight,
+        }
 
     def create_comment(self, payload: dict[str, Any]) -> dict[str, Any]:
         comment = {
@@ -1041,7 +1134,9 @@ class PostgresMetadataStore:
 
     def export_notes(self, book_id: str, user_id: str, users: dict[str, dict[str, Any]]) -> str:
         book = self.get_book_detail(book_id)
-        threads = [thread for thread in self.get_threads(book_id) if thread["annotation"]["userId"] == user_id]
+        threads = [
+            thread for thread in self.get_threads(book_id) if thread["annotation"] and thread["annotation"]["userId"] == user_id
+        ]
         lines = [
             f"# {book['title']} - {users[user_id]['name']}的笔记",
             "",

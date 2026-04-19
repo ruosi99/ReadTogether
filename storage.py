@@ -7,6 +7,7 @@ import hashlib
 import hmac
 from pathlib import Path
 from typing import Optional, Protocol
+from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
@@ -53,6 +54,7 @@ class OssConfig:
 @dataclass
 class ObjectStorageBookStorage:
     config: OssConfig
+    request_timeout_seconds: int = 15
 
     def ensure_ready(self) -> None:
         missing = [
@@ -93,22 +95,28 @@ class ObjectStorageBookStorage:
                 "Authorization": f"OSS {self.config.access_key_id}:{signature}",
             },
         )
-        with urlopen(request) as response:
-            if response.status not in (200, 201):
-                raise RuntimeError(f"OSS upload failed with status {response.status}")
+        try:
+            with urlopen(request, timeout=self.request_timeout_seconds) as response:
+                if response.status not in (200, 201):
+                    raise RuntimeError(f"OSS upload failed with status {response.status}")
+        except HTTPError as error:
+            detail = error.read().decode("utf-8", errors="ignore")
+            raise RuntimeError(f"OSS upload failed: HTTP {error.code}. {detail}".strip()) from error
+        except URLError as error:
+            raise RuntimeError(f"OSS upload failed: {error.reason}") from error
         return storage_key
 
     def read_book(self, storage_key: str) -> bytes:
         request = Request(self._object_url(storage_key), method="GET")
         self._sign_request(request, storage_key)
-        with urlopen(request) as response:
+        with urlopen(request, timeout=self.request_timeout_seconds) as response:
             return response.read()
 
     def delete_book(self, storage_key: str) -> None:
         request = Request(self._object_url(storage_key), method="DELETE")
         self._sign_request(request, storage_key)
         try:
-            with urlopen(request):
+            with urlopen(request, timeout=self.request_timeout_seconds):
                 return
         except Exception:
             # Keep delete best-effort so failed cleanup does not block user flows.

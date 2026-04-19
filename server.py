@@ -32,6 +32,7 @@ USERS = {
 class AppConfig:
     storage_mode: str
     database_mode: str
+    bind_host: str
     local_book_dir: Path
     sqlite_db_path: Path
     postgres_dsn: str
@@ -45,11 +46,16 @@ class AppConfig:
 
 
 def load_config() -> AppConfig:
-    local_book_dir = Path(os.environ.get("LOCAL_BOOK_DIR", DATA_DIR / "books")).resolve()
-    sqlite_db_path = Path(os.environ.get("SQLITE_DB_PATH", DATA_DIR / "read_together.db")).resolve()
+    local_book_dir = Path(
+        os.environ.get("LOCAL_BOOKS_DIR") or os.environ.get("LOCAL_BOOK_DIR", DATA_DIR / "books")
+    ).resolve()
+    sqlite_db_path = Path(
+        os.environ.get("SQLITE_PATH") or os.environ.get("SQLITE_DB_PATH", DATA_DIR / "read_together.db")
+    ).resolve()
     return AppConfig(
         storage_mode=os.environ.get("STORAGE_MODE", "local"),
         database_mode=os.environ.get("DATABASE_MODE", "sqlite"),
+        bind_host=os.environ.get("BIND_HOST", "0.0.0.0"),
         local_book_dir=local_book_dir,
         sqlite_db_path=sqlite_db_path,
         postgres_dsn=os.environ.get("POSTGRES_DSN", ""),
@@ -199,6 +205,12 @@ class ReadTogetherHandler(SimpleHTTPRequestHandler):
             BUS.publish("progress.updated", {"bookId": payload["bookId"], "progress": progress})
             self.send_json({"progress": progress}, status=HTTPStatus.CREATED)
             return
+        if parsed.path == "/api/highlights":
+            payload = self.read_json()
+            thread = METADATA_STORE.create_highlight(payload)
+            BUS.publish("highlight.created", {"bookId": payload["bookId"], "thread": thread})
+            self.send_json({"thread": thread}, status=HTTPStatus.CREATED)
+            return
         if parsed.path == "/api/annotations":
             payload = self.read_json()
             thread = METADATA_STORE.create_annotation(payload)
@@ -225,53 +237,56 @@ class ReadTogetherHandler(SimpleHTTPRequestHandler):
         self.end_headers()
 
     def handle_upload(self) -> None:
-        form = cgi.FieldStorage(
-            fp=self.rfile,
-            headers=self.headers,
-            environ={
-                "REQUEST_METHOD": "POST",
-                "CONTENT_TYPE": self.headers.get("Content-Type", ""),
-            },
-        )
-        file_item = form["file"] if "file" in form else None
-        uploaded_by = form.getfirst("uploadedBy", "you")
-        if file_item is None or not getattr(file_item, "filename", ""):
-            self.send_json({"error": "请上传 EPUB 文件。"}, status=HTTPStatus.BAD_REQUEST)
-            return
-        if not str(file_item.filename).lower().endswith(".epub"):
-            self.send_json({"error": "首版仅支持 EPUB 文件。"}, status=HTTPStatus.BAD_REQUEST)
-            return
-
-        raw_bytes = file_item.file.read()
-        book_id = make_id("book")
-        storage_key = f"{book_id}.epub"
-
         try:
-            parsed_book = parse_epub_bytes(raw_bytes, fallback_name=file_item.filename)
-        except EpubParseError as error:
-            self.send_json({"error": str(error)}, status=HTTPStatus.BAD_REQUEST)
-            return
+            form = cgi.FieldStorage(
+                fp=self.rfile,
+                headers=self.headers,
+                environ={
+                    "REQUEST_METHOD": "POST",
+                    "CONTENT_TYPE": self.headers.get("Content-Type", ""),
+                },
+            )
+            file_item = form["file"] if "file" in form else None
+            uploaded_by = form.getfirst("uploadedBy", "you")
+            if file_item is None or not getattr(file_item, "filename", ""):
+                self.send_json({"error": "Please upload an EPUB file."}, status=HTTPStatus.BAD_REQUEST)
+                return
+            if not str(file_item.filename).lower().endswith(".epub"):
+                self.send_json({"error": "Only EPUB files are supported right now."}, status=HTTPStatus.BAD_REQUEST)
+                return
 
-        BOOK_STORAGE.save_book(storage_key, raw_bytes)
-        payload = {
-            "id": book_id,
-            "title": parsed_book["title"],
-            "author": parsed_book["author"],
-            "fileName": file_item.filename,
-            "storageKey": storage_key,
-            "uploadedBy": uploaded_by,
-            "chapters": parsed_book["chapters"],
-        }
+            raw_bytes = file_item.file.read()
+            book_id = make_id("book")
+            storage_key = f"{book_id}.epub"
 
-        try:
-            METADATA_STORE.create_book(payload)
-        except Exception:
-            BOOK_STORAGE.delete_book(storage_key)
-            raise
+            try:
+                parsed_book = parse_epub_bytes(raw_bytes, fallback_name=file_item.filename)
+            except EpubParseError as error:
+                self.send_json({"error": str(error)}, status=HTTPStatus.BAD_REQUEST)
+                return
 
-        book = METADATA_STORE.get_book_detail(book_id)
-        BUS.publish("book.created", {"book": book})
-        self.send_json({"book": book}, status=HTTPStatus.CREATED)
+            BOOK_STORAGE.save_book(storage_key, raw_bytes)
+            payload = {
+                "id": book_id,
+                "title": parsed_book["title"],
+                "author": parsed_book["author"],
+                "fileName": file_item.filename,
+                "storageKey": storage_key,
+                "uploadedBy": uploaded_by,
+                "chapters": parsed_book["chapters"],
+            }
+
+            try:
+                METADATA_STORE.create_book(payload)
+            except Exception:
+                BOOK_STORAGE.delete_book(storage_key)
+                raise
+
+            book = METADATA_STORE.get_book_detail(book_id)
+            BUS.publish("book.created", {"book": book})
+            self.send_json({"book": book}, status=HTTPStatus.CREATED)
+        except Exception as error:
+            self.send_json({"error": f"Upload failed: {error}"}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
 
     def handle_events(self, query_string: str) -> None:
         last_event_id = int(urllib.parse.parse_qs(query_string).get("lastEventId", ["0"])[0])
@@ -318,8 +333,8 @@ def ensure_runtime() -> None:
 def main() -> None:
     ensure_runtime()
     port = int(os.environ.get("PORT", "8000"))
-    server = ThreadingHTTPServer(("127.0.0.1", port), ReadTogetherHandler)
-    print(f"Read Together running at http://127.0.0.1:{port}")
+    server = ThreadingHTTPServer((CONFIG.bind_host, port), ReadTogetherHandler)
+    print(f"Read Together running at http://{CONFIG.bind_host}:{port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

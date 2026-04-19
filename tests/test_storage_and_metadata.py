@@ -134,6 +134,62 @@ class StorageAndMetadataTests(unittest.TestCase):
         self.assertEqual(you_progress["pageIndex"], 3)
         self.assertEqual(threads[0]["annotation"]["userId"], "you")
 
+    def test_highlight_can_exist_without_annotation_and_later_receive_note(self) -> None:
+        store = SqliteMetadataStore(self.db_path)
+        store.ensure_ready()
+        store.seed_users(
+            {
+                "you": {"id": "you", "name": "Reader", "accent": "#c65f2d"},
+                "partner": {"id": "partner", "name": "Partner", "accent": "#2f6c62"},
+            }
+        )
+        store.create_book(
+            {
+                "id": "book_3",
+                "title": "Highlight Book",
+                "author": "Tester",
+                "fileName": "highlight.epub",
+                "storageKey": "books/book_3.epub",
+                "uploadedBy": "you",
+                "chapters": [
+                    {
+                        "title": "Chapter One",
+                        "href": "OPS/chapter1.xhtml",
+                        "content_html": "<p>Hello world</p>",
+                        "plain_text": "Hello world",
+                    }
+                ],
+            }
+        )
+
+        highlight_thread = store.create_highlight(
+            {
+                "bookId": "book_3",
+                "userId": "you",
+                "chapterIndex": 0,
+                "startOffset": 0,
+                "endOffset": 5,
+                "quote": "Hello",
+                "color": "#c65f2d",
+            }
+        )
+        attached_thread = store.create_annotation(
+            {
+                "bookId": "book_3",
+                "userId": "partner",
+                "highlightId": highlight_thread["highlight"]["id"],
+                "body": "Nice line",
+            }
+        )
+
+        threads = store.get_threads("book_3")
+        detail = store.get_book_detail("book_3")
+
+        self.assertEqual(detail["annotationCount"], 1)
+        self.assertIsNone(highlight_thread["annotation"])
+        self.assertEqual(attached_thread["highlight"]["id"], highlight_thread["highlight"]["id"])
+        self.assertEqual(threads[0]["annotation"]["userId"], "partner")
+
     def test_legacy_books_table_with_file_path_still_accepts_new_writes(self) -> None:
         store = SqliteMetadataStore(self.db_path)
         with store.connect() as connection:

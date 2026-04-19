@@ -12,7 +12,7 @@
       <header class="topbar">
         <div>
           <a class="brand" href="#/">Read Together</a>
-          <p class="subtitle">共享书架、同步批注、双人共读</p>
+          <p class="subtitle">共享书架、实时标注、双人共读</p>
         </div>
         <div class="topbar-actions">
           <nav class="nav-pill">
@@ -29,14 +29,14 @@
       <section class="page-grid">
         <div class="hero-card">
           <div>
-            <span class="eyebrow">Shared Reading MVP</span>
+            <span class="eyebrow">Shared Reading</span>
             <h1>你们的共读空间已经准备好了</h1>
-            <p>上传一本 EPUB，就能一起阅读、划线、评论，并沉淀各自的笔记。</p>
+            <p>上传一本 EPUB，就可以一起阅读、划线、写批注并同步彼此的进度。</p>
           </div>
           <label class="upload-card">
             <input id="book-upload" accept=".epub,application/epub+zip" type="file" />
             <span id="upload-label">上传 EPUB 到共享书架</span>
-            <small>本地先跑通，后续可迁移到云端对象存储和数据库</small>
+            <small>当前版本支持双人共读、实时标注、手机分页阅读和笔记导出。</small>
           </label>
         </div>
 
@@ -65,8 +65,8 @@
             <p id="detail-author"></p>
             <div class="detail-actions">
               <a class="primary-button" id="read-link" href="#">开始共读</a>
-              <button class="secondary-button" data-export-user="you">导出你的笔记</button>
-              <button class="secondary-button" data-export-user="partner">导出男朋友的笔记</button>
+              <button class="secondary-button" data-export-user="you">导出我的笔记</button>
+              <button class="secondary-button" data-export-user="partner">导出对方笔记</button>
             </div>
             <small id="detail-uploaded-at"></small>
           </div>
@@ -91,7 +91,7 @@
             <a class="back-link" id="reader-back" href="#">返回</a>
             <div class="toolbar-group">
               <button class="small-button" data-reader-panel="toc">目录</button>
-              <button class="small-button" data-reader-panel="notes">笔记</button>
+              <button class="small-button" data-reader-panel="notes">标注</button>
               <button class="small-button" data-reader-panel="settings">设置</button>
             </div>
           </div>
@@ -108,8 +108,6 @@
             </div>
             <div class="reader-progress-value" id="reader-progress-value">0%</div>
           </div>
-          <input id="profile-name-input" type="hidden" />
-          <input id="profile-avatar-input" type="hidden" />
           <div class="reader-panel-root" id="reader-panel-root"></div>
         </div>
       </section>
