@@ -1214,91 +1214,30 @@ function getReaderMetrics() {
 }
 
 function paginateChapter(chapter, metrics) {
-  const fragments = extractParagraphs(chapter.plainText || "");
-  if (!fragments.length) {
+  const text = String(chapter.plainText || "").replace(/\r\n/g, "\n").trim();
+  if (!text) {
     return [{ startOffset: 0, endOffset: 0, fragments: [{ text: "", startOffset: 0, endOffset: 0 }] }];
   }
-  const pages = [];
-  let pageFragments = [];
   const maxCharsPerPage = estimateCharsPerPage(metrics);
-  let currentChars = 0;
-
-  function pushPage() {
-    if (!pageFragments.length) {
-      return;
-    }
+  const pages = [];
+  let start = 0;
+  while (start < text.length) {
+    const targetEnd = Math.min(text.length, start + maxCharsPerPage);
+    const end = targetEnd >= text.length ? text.length : normalizeSliceLength(text, targetEnd, start);
+    const pageText = text.slice(start, end).trim();
+    const trimmedLeading = text.slice(start, end).match(/^\s*/)?.[0].length || 0;
+    const effectiveStart = start + trimmedLeading;
     pages.push({
-      startOffset: pageFragments[0].startOffset,
-      endOffset: pageFragments[pageFragments.length - 1].endOffset,
-      fragments: pageFragments,
+      startOffset: effectiveStart,
+      endOffset: effectiveStart + pageText.length,
+      fragments: [{ text: pageText, startOffset: effectiveStart, endOffset: effectiveStart + pageText.length }],
     });
-    pageFragments = [];
+    start = end;
+    while (/\s/.test(text[start] || "")) {
+      start += 1;
+    }
   }
-
-  fragments.forEach((fragment) => {
-    let remainingText = fragment.text;
-    let remainingStart = fragment.startOffset;
-    while (remainingText.length) {
-      const normalizedLength = Math.max(1, remainingText.length);
-      if (currentChars + normalizedLength <= maxCharsPerPage) {
-        pageFragments.push({
-          text: remainingText,
-          startOffset: remainingStart,
-          endOffset: remainingStart + remainingText.length,
-        });
-        currentChars += normalizedLength + 1;
-        remainingText = "";
-        continue;
-      }
-      const available = Math.max(80, maxCharsPerPage - currentChars);
-      if (available <= 80 && pageFragments.length) {
-        pushPage();
-        currentChars = 0;
-        continue;
-      }
-      const chosenLength = normalizeSliceLength(remainingText, Math.min(remainingText.length, available));
-      const sliceText = remainingText.slice(0, chosenLength);
-      pageFragments.push({
-        text: sliceText,
-        startOffset: remainingStart,
-        endOffset: remainingStart + sliceText.length,
-      });
-      currentChars += sliceText.length + 1;
-      pushPage();
-      currentChars = 0;
-      const trimmed = trimLeadingWhitespace(remainingText.slice(chosenLength));
-      remainingStart += chosenLength + trimmed.trimmedCount;
-      remainingText = trimmed.text;
-    }
-  });
-  pushPage();
-  return pages.length ? pages : [{ startOffset: 0, endOffset: 0, fragments: [] }];
-}
-
-function extractParagraphs(text) {
-  const normalized = String(text || "").replace(/\r\n/g, "\n");
-  const blocks = [];
-  const pattern = /[\s\S]*?(?:\n\s*\n|$)/g;
-  let match;
-  while ((match = pattern.exec(normalized))) {
-    if (!match[0]) {
-      break;
-    }
-    const raw = match[0].replace(/\n\s*\n$/, "");
-    const leading = raw.match(/^\s*/)?.[0].length || 0;
-    const trailing = raw.match(/\s*$/)?.[0].length || 0;
-    const textValue = raw.slice(leading, Math.max(leading, raw.length - trailing));
-    if (!textValue) {
-      continue;
-    }
-    const startOffset = match.index + leading;
-    blocks.push({
-      text: textValue,
-      startOffset,
-      endOffset: startOffset + textValue.length,
-    });
-  }
-  return blocks;
+  return pages;
 }
 
 function estimateCharsPerPage(metrics) {
@@ -1309,14 +1248,14 @@ function estimateCharsPerPage(metrics) {
   return charsPerLine * lineCount;
 }
 
-function normalizeSliceLength(text, length) {
-  const start = Math.max(1, length - 24);
+function normalizeSliceLength(text, length, floor = 0) {
+  const start = Math.max(floor + 1, length - 48);
   for (let index = length; index >= start; index -= 1) {
     if (/[\s，。！？；、,.!?;:]/.test(text[index] || "")) {
       return index + 1;
     }
   }
-  return Math.max(1, length);
+  return Math.max(floor + 1, length);
 }
 
 function trimLeadingWhitespace(text) {
