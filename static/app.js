@@ -953,6 +953,7 @@ function handleTouchStart(event) {
     x: touch.clientX,
     y: touch.clientY,
     startedInPageBody: Boolean(event.target?.closest?.("#reader-page-body")),
+    startedAt: Date.now(),
   };
 }
 
@@ -969,7 +970,16 @@ function handleTouchEnd(event) {
   }
   const dx = touch.clientX - state.touchStart.x;
   const dy = touch.clientY - state.touchStart.y;
+  const duration = Date.now() - state.touchStart.startedAt;
+  if (state.touchStart.startedInPageBody && duration > 180) {
+    state.touchStart = null;
+    return;
+  }
   if (state.touchStart.startedInPageBody && Math.abs(dx) < 24 && Math.abs(dy) < 24) {
+    state.touchStart = null;
+    return;
+  }
+  if (state.touchStart.startedInPageBody && Math.abs(dx) < 72) {
     state.touchStart = null;
     return;
   }
@@ -1209,8 +1219,9 @@ function paginateChapter(chapter, metrics) {
     return [{ startOffset: 0, endOffset: 0, fragments: [{ text: "", startOffset: 0, endOffset: 0 }] }];
   }
   const pages = [];
-  const measureRoot = getMeasureRoot(metrics);
   let pageFragments = [];
+  const maxCharsPerPage = estimateCharsPerPage(metrics);
+  let currentChars = 0;
 
   function pushPage() {
     if (!pageFragments.length) {
@@ -1228,32 +1239,36 @@ function paginateChapter(chapter, metrics) {
     let remainingText = fragment.text;
     let remainingStart = fragment.startOffset;
     while (remainingText.length) {
-      const wholeFragment = {
-        text: remainingText,
-        startOffset: remainingStart,
-        endOffset: remainingStart + remainingText.length,
-      };
-      if (pageFits([...pageFragments, wholeFragment], chapter.title, metrics, measureRoot)) {
-        pageFragments.push(wholeFragment);
+      const normalizedLength = Math.max(1, remainingText.length);
+      if (currentChars + normalizedLength <= maxCharsPerPage) {
+        pageFragments.push({
+          text: remainingText,
+          startOffset: remainingStart,
+          endOffset: remainingStart + remainingText.length,
+        });
+        currentChars += normalizedLength + 1;
         remainingText = "";
         continue;
       }
-      if (!pageFragments.length) {
-        const sliceLength = fitSliceLength(remainingText, chapter.title, metrics, measureRoot);
-        const chosenLength = normalizeSliceLength(remainingText, sliceLength);
-        const sliceText = remainingText.slice(0, chosenLength);
-        pageFragments.push({
-          text: sliceText,
-          startOffset: remainingStart,
-          endOffset: remainingStart + sliceText.length,
-        });
+      const available = Math.max(80, maxCharsPerPage - currentChars);
+      if (available <= 80 && pageFragments.length) {
         pushPage();
-        const trimmed = trimLeadingWhitespace(remainingText.slice(chosenLength));
-        remainingStart += chosenLength + trimmed.trimmedCount;
-        remainingText = trimmed.text;
+        currentChars = 0;
         continue;
       }
+      const chosenLength = normalizeSliceLength(remainingText, Math.min(remainingText.length, available));
+      const sliceText = remainingText.slice(0, chosenLength);
+      pageFragments.push({
+        text: sliceText,
+        startOffset: remainingStart,
+        endOffset: remainingStart + sliceText.length,
+      });
+      currentChars += sliceText.length + 1;
       pushPage();
+      currentChars = 0;
+      const trimmed = trimLeadingWhitespace(remainingText.slice(chosenLength));
+      remainingStart += chosenLength + trimmed.trimmedCount;
+      remainingText = trimmed.text;
     }
   });
   pushPage();
@@ -1286,37 +1301,12 @@ function extractParagraphs(text) {
   return blocks;
 }
 
-function getMeasureRoot(metrics) {
-  let measure = document.getElementById("reader-measure");
-  if (!measure) {
-    measure = document.createElement("div");
-    measure.id = "reader-measure";
-    measure.className = "reader-measure";
-    document.body.appendChild(measure);
-  }
-  measure.style.width = `${metrics.width}px`;
-  return measure;
-}
-
-function pageFits(fragments, title, metrics, measureRoot) {
-  measureRoot.innerHTML = renderMeasureMarkup(title, fragments);
-  return measureRoot.offsetHeight <= metrics.height;
-}
-
-function fitSliceLength(text, title, metrics, measureRoot) {
-  let low = 1;
-  let high = text.length;
-  let best = 1;
-  while (low <= high) {
-    const middle = Math.floor((low + high) / 2);
-    if (pageFits([{ text: text.slice(0, middle), startOffset: 0, endOffset: middle }], title, metrics, measureRoot)) {
-      best = middle;
-      low = middle + 1;
-    } else {
-      high = middle - 1;
-    }
-  }
-  return best;
+function estimateCharsPerPage(metrics) {
+  const charsPerLine = Math.max(12, Math.floor(metrics.width / 18));
+  const lineHeight = 31;
+  const usableHeight = Math.max(220, metrics.height - 84);
+  const lineCount = Math.max(8, Math.floor(usableHeight / lineHeight));
+  return charsPerLine * lineCount;
 }
 
 function normalizeSliceLength(text, length) {
@@ -1332,21 +1322,4 @@ function normalizeSliceLength(text, length) {
 function trimLeadingWhitespace(text) {
   const match = text.match(/^\s*/)?.[0] || "";
   return { text: text.slice(match.length), trimmedCount: match.length };
-}
-
-function renderMeasureMarkup(title, fragments) {
-  return `
-    <section class="reader-page-card reader-page-card--measure">
-      <header class="reader-page-head">
-        <span class="eyebrow">章节</span>
-        <h1>${escapeHtml(title)}</h1>
-        <small>分页测量</small>
-      </header>
-      <div class="reader-page-body">
-        ${fragments
-          .map((fragment) => `<p class="reader-page-fragment">${escapeHtml(fragment.text)}</p>`)
-          .join("")}
-      </div>
-    </section>
-  `;
 }

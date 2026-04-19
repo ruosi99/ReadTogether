@@ -310,10 +310,6 @@ body.reader-mode .app-shell {
   gap: 18px;
 }
 
-.reader-page-card--measure {
-  min-height: auto;
-}
-
 .reader-page-head {
   display: grid;
   gap: 8px;
@@ -611,14 +607,6 @@ body.reader-mode .app-shell {
 
 .error-text {
   color: #b42f14;
-}
-
-.reader-measure {
-  position: fixed;
-  left: -9999px;
-  top: -9999px;
-  visibility: hidden;
-  pointer-events: none;
 }
 
 @media (max-width: 980px) {
