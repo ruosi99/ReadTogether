@@ -3,12 +3,14 @@ const state = {
   users: [],
   books: [],
   currentBook: null,
+  currentChapter: null,
   currentThreads: [],
   currentChapterIndex: 0,
   currentPageIndex: 0,
   currentPageCount: 1,
   currentPages: [],
   pageCache: {},
+  chapterCache: {},
   theme: "paper",
   pendingSelection: null,
   noteDraft: "",
@@ -256,17 +258,18 @@ async function renderDetail(bookId) {
 }
 
 async function renderReader(bookId) {
-  state.currentBook = await api(`/api/books/${bookId}/content`);
+  state.currentBook = await api(`/api/books/${bookId}`);
   state.currentThreads = (await api(`/api/books/${bookId}/threads`)).threads;
   const currentProgress = (state.currentBook.progress || []).find((item) => item.userId === state.activeUserId);
   state.currentChapterIndex = currentProgress?.chapterIndex || 0;
   state.currentPageIndex = currentProgress?.pageIndex || 0;
   state.currentPageCount = Math.max(1, currentProgress?.pageCount || 1);
   state.pageCache = {};
+  state.chapterCache = {};
   app.innerHTML = document.getElementById("reader-template").innerHTML;
   attachReaderControls();
   ensureReaderSelectionListeners();
-  drawReaderPage();
+  await loadCurrentChapter(state.currentChapterIndex, state.currentPageIndex);
 }
 
 function attachReaderControls() {
@@ -303,19 +306,21 @@ function ensureReaderSelectionListeners() {
 }
 
 function currentChapter() {
-  return state.currentBook?.chapters?.[state.currentChapterIndex];
+  return state.currentChapter;
 }
 
-function getCurrentPages() {
-  const chapter = currentChapter();
-  if (!chapter) {
-    return [];
+async function loadCurrentChapter(chapterIndex, preferredPageIndex = 0) {
+  const nextChapterIndex = clamp(chapterIndex, 0, Math.max(0, (state.currentBook?.chapters?.length || 1) - 1));
+  state.currentChapterIndex = nextChapterIndex;
+  const cacheKey = `${state.currentBook.id}:${nextChapterIndex}`;
+  if (!state.chapterCache[cacheKey]) {
+    state.chapterCache[cacheKey] = await api(`/api/books/${state.currentBook.id}/chapters/${nextChapterIndex}`);
   }
-  const cacheKey = `${state.currentBook.id}:${state.currentChapterIndex}:${readerViewportSignature()}`;
-  if (!state.pageCache[cacheKey]) {
-    state.pageCache = { [cacheKey]: paginateChapter(chapter, getReaderMetrics()) };
-  }
-  return state.pageCache[cacheKey];
+  state.currentChapter = state.chapterCache[cacheKey];
+  state.currentPageIndex = Math.max(0, preferredPageIndex || 0);
+  clearPendingSelection(false);
+  drawReaderPage();
+  await settleChapterPagination();
 }
 
 function drawReaderPage() {
@@ -323,35 +328,32 @@ function drawReaderPage() {
   if (!chapter) {
     return;
   }
-  state.currentPages = getCurrentPages();
-  state.currentPageCount = Math.max(1, state.currentPages.length);
-  state.currentPageIndex = clamp(state.currentPageIndex, 0, state.currentPageCount - 1);
-  const page = state.currentPages[state.currentPageIndex];
   const surface = document.getElementById("reader-surface");
   const content = document.getElementById("reader-content");
   surface.className = `reader-surface theme-${state.theme}`;
 
-  content.innerHTML = renderReaderPageMarkup(chapter, page);
+  content.innerHTML = renderReaderPageMarkup(chapter);
   bindSelectionSurface();
-  applyHighlights(content, currentPageThreads(page), page);
+  applyHighlights(document.getElementById("reader-page-body"), currentChapterThreads());
   renderReaderProgress();
   renderReaderPanel();
-  scheduleProgressSync();
 }
 
-function renderReaderPageMarkup(chapter, page) {
-  const fragmentsHtml = page.fragments
-    .map(
-      (fragment, index) => `
-        <p
-          class="reader-page-fragment"
-          data-fragment-start="${fragment.startOffset}"
-          data-fragment-end="${fragment.endOffset}"
-          data-fragment-index="${index}"
-        >${escapeHtml(fragment.text)}</p>
-      `
-    )
-    .join("");
+function renderReaderPageMarkup(chapter) {
+  const fragmentsHtml = "";
+
+  return `
+    <section class="reader-page-card">
+      <header class="reader-page-head">
+        <span class="eyebrow">Chapter ${state.currentChapterIndex + 1}</span>
+        <h1>${escapeHtml(chapter.title)}</h1>
+        <small>Page ${state.currentPageIndex + 1} / ${state.currentPageCount}</small>
+      </header>
+      <div class="reader-page-body" id="reader-page-body">
+        <div class="reader-page-flow" id="reader-page-flow">${chapter.contentHtml || ""}</div>
+      </div>
+    </section>
+  `;
 
   return `
     <section class="reader-page-card">
@@ -373,6 +375,24 @@ function bindSelectionSurface() {
   ["mouseup", "touchend", "pointerup"].forEach((eventName) => {
     body.addEventListener(eventName, queueSelectionCapture, { passive: true });
   });
+}
+
+async function settleChapterPagination() {
+  await nextFrame();
+  const body = document.getElementById("reader-page-body");
+  const flow = document.getElementById("reader-page-flow");
+  if (!body || !flow) {
+    return;
+  }
+  const gap = 32;
+  flow.style.setProperty("--reader-page-width", `${body.clientWidth}px`);
+  const totalWidth = Math.max(body.clientWidth, flow.scrollWidth);
+  state.currentPageCount = Math.max(1, Math.ceil((totalWidth + gap) / (body.clientWidth + gap)));
+  state.currentPageIndex = clamp(state.currentPageIndex, 0, state.currentPageCount - 1);
+  flow.style.transform = `translateX(-${state.currentPageIndex * (body.clientWidth + gap)}px)`;
+  renderReaderProgress();
+  renderReaderPanel();
+  scheduleProgressSync();
 }
 
 function queueSelectionCapture() {
@@ -420,14 +440,13 @@ function captureSelection() {
 }
 
 function absoluteOffsetFromNode(node, offset) {
-  const element =
-    node.nodeType === Node.ELEMENT_NODE ? node.closest?.("[data-fragment-start]") : node.parentElement?.closest?.("[data-fragment-start]");
-  if (!element) {
+  const root = document.getElementById("reader-page-body");
+  if (!root) {
     return null;
   }
-  let total = Number(element.dataset.fragmentStart || 0);
+  let total = 0;
   if (node.nodeType === Node.ELEMENT_NODE) {
-    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
     let childIndex = 0;
     while (walker.nextNode()) {
       const textNode = walker.currentNode;
@@ -441,7 +460,7 @@ function absoluteOffsetFromNode(node, offset) {
     }
     return total;
   }
-  const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   while (walker.nextNode()) {
     const textNode = walker.currentNode;
     if (textNode === node) {
@@ -452,35 +471,26 @@ function absoluteOffsetFromNode(node, offset) {
   return total;
 }
 
-function currentPageThreads(page) {
+function currentChapterThreads() {
   return state.currentThreads.filter((thread) => {
-    if (thread.highlight.chapterIndex !== state.currentChapterIndex) {
-      return false;
-    }
-    return thread.highlight.endOffset > page.startOffset && thread.highlight.startOffset < page.endOffset;
+    return thread.highlight.chapterIndex === state.currentChapterIndex;
   });
 }
 
-function applyHighlights(container, threads, page) {
+function applyHighlights(container, threads) {
+  if (!container) {
+    return;
+  }
   const sortedThreads = [...threads].sort((left, right) => right.highlight.startOffset - left.highlight.startOffset);
   sortedThreads.forEach((thread) => {
-    container.querySelectorAll("[data-fragment-start]").forEach((fragmentElement) => {
-      const fragmentStart = Number(fragmentElement.dataset.fragmentStart);
-      const fragmentEnd = Number(fragmentElement.dataset.fragmentEnd);
-      const localStart = Math.max(thread.highlight.startOffset, fragmentStart);
-      const localEnd = Math.min(thread.highlight.endOffset, fragmentEnd);
-      if (localEnd <= localStart) {
-        return;
-      }
-      wrapTextRange(
-        fragmentElement,
-        localStart - fragmentStart,
-        localEnd - fragmentStart,
-        thread.highlight.color,
-        (thread.annotation?.userId || thread.highlight.userId) === state.activeUserId,
-        Boolean(thread.annotation)
-      );
-    });
+    wrapTextRange(
+      container,
+      thread.highlight.startOffset,
+      thread.highlight.endOffset,
+      thread.highlight.color,
+      (thread.annotation?.userId || thread.highlight.userId) === state.activeUserId,
+      Boolean(thread.annotation)
+    );
   });
 }
 
@@ -921,18 +931,14 @@ function stepReaderPage(step) {
   }
   state.currentPageIndex = target;
   clearPendingSelection(false);
-  drawReaderPage();
+  settleChapterPagination();
 }
 
-function jumpToChapter(chapterIndex, pageFraction = 0) {
+async function jumpToChapter(chapterIndex, pageFraction = 0) {
   const nextChapter = clamp(chapterIndex, 0, state.currentBook.chapters.length - 1);
-  state.currentChapterIndex = nextChapter;
-  state.currentPages = getCurrentPages();
-  state.currentPageCount = Math.max(1, state.currentPages.length);
-  state.currentPageIndex = clamp(Math.round(pageFraction * Math.max(0, state.currentPageCount - 1)), 0, state.currentPageCount - 1);
-  clearPendingSelection(false);
+  const fallbackPage = clamp(Math.round(pageFraction * Math.max(0, state.currentPageCount - 1)), 0, Math.max(0, state.currentPageCount - 1));
   state.activeReaderPanel = null;
-  drawReaderPage();
+  await loadCurrentChapter(nextChapter, fallbackPage);
 }
 
 function handleProgressJump(event) {
@@ -993,12 +999,7 @@ function handleViewportResize() {
   if (route().name !== "reader" || !state.currentBook) {
     return;
   }
-  const pageFraction = state.currentPageCount <= 1 ? 0 : state.currentPageIndex / Math.max(1, state.currentPageCount - 1);
-  state.pageCache = {};
-  state.currentPages = getCurrentPages();
-  state.currentPageCount = Math.max(1, state.currentPages.length);
-  state.currentPageIndex = clamp(Math.round(pageFraction * Math.max(0, state.currentPageCount - 1)), 0, state.currentPageCount - 1);
-  drawReaderPage();
+  settleChapterPagination();
 }
 
 async function handleAvatarPick(event) {
@@ -1178,6 +1179,10 @@ function formatTime(value) {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function nextFrame() {
+  return new Promise((resolve) => window.requestAnimationFrame(() => resolve()));
 }
 
 function readFileAsDataUrl(file) {

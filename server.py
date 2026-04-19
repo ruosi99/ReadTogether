@@ -170,6 +170,20 @@ class ReadTogetherHandler(SimpleHTTPRequestHandler):
             book_id = parsed.path.split("/")[3]
             self.send_json(METADATA_STORE.get_book_content(book_id))
             return
+        if parsed.path.startswith("/api/books/") and "/chapters/" in parsed.path:
+            parts = parsed.path.split("/")
+            if len(parts) >= 6:
+                book_id = parts[3]
+                try:
+                    chapter_index = int(parts[5])
+                except ValueError:
+                    self.send_json({"error": "Invalid chapter index."}, status=HTTPStatus.BAD_REQUEST)
+                    return
+                try:
+                    self.send_json(METADATA_STORE.get_chapter_content(book_id, chapter_index))
+                except KeyError:
+                    self.send_json({"error": "Chapter not found."}, status=HTTPStatus.NOT_FOUND)
+                return
         if parsed.path.startswith("/api/books/") and parsed.path.endswith("/threads"):
             book_id = parsed.path.split("/")[3]
             self.send_json({"threads": [normalize_thread(thread) for thread in METADATA_STORE.get_threads(book_id)]})

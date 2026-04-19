@@ -34,6 +34,8 @@ class MetadataStore(Protocol):
 
     def get_book_content(self, book_id: str) -> dict[str, Any]: ...
 
+    def get_chapter_content(self, book_id: str, chapter_index: int) -> dict[str, Any]: ...
+
     def get_threads(self, book_id: str) -> list[dict[str, Any]]: ...
 
     def upsert_progress(self, payload: dict[str, Any]) -> dict[str, Any]: ...
@@ -493,6 +495,26 @@ class SqliteMetadataStore:
             ]
             return book
 
+    def get_chapter_content(self, book_id: str, chapter_index: int) -> dict[str, Any]:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT chapter_index, title, href, content_html, plain_text
+                FROM chapters
+                WHERE book_id = ? AND chapter_index = ?
+                """,
+                (book_id, chapter_index),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"{book_id}:{chapter_index}")
+            return {
+                "index": row["chapter_index"],
+                "title": row["title"],
+                "href": row["href"],
+                "contentHtml": row["content_html"],
+                "plainText": row["plain_text"],
+            }
+
     def get_threads(self, book_id: str) -> list[dict[str, Any]]:
         with self.connect() as connection:
             highlight_rows = connection.execute(
@@ -930,6 +952,27 @@ class PostgresMetadataStore:
                 for row in chapters
             ]
             return book
+
+    def get_chapter_content(self, book_id: str, chapter_index: int) -> dict[str, Any]:
+        with self.connect() as connection:
+            row = self._fetchone_connection(
+                connection,
+                """
+                SELECT chapter_index, title, href, content_html, plain_text
+                FROM chapters
+                WHERE book_id = %s AND chapter_index = %s
+                """,
+                (book_id, chapter_index),
+            )
+            if row is None:
+                raise KeyError(f"{book_id}:{chapter_index}")
+            return {
+                "index": row["chapter_index"],
+                "title": row["title"],
+                "href": row["href"],
+                "contentHtml": row["content_html"],
+                "plainText": row["plain_text"],
+            }
 
     def get_threads(self, book_id: str) -> list[dict[str, Any]]:
         with self.connect() as connection:
