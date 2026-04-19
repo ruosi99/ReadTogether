@@ -169,7 +169,22 @@ async function renderDetail(bookId) {
   document.getElementById("detail-cover-text").textContent = state.currentBook.title.slice(0, 2);
   document.getElementById("detail-title").textContent = state.currentBook.title;
   document.getElementById("detail-author").textContent = state.currentBook.author;
-  document.getElementById("read-link").href = `#/books/${bookId}/read`;
+  const readHref = `#/books/${bookId}/read`;
+  const readLink = document.getElementById("read-link");
+  readLink.href = readHref;
+  readLink.addEventListener("click", (event) => {
+    event.preventDefault();
+    if (window.location.hash === readHref) {
+      render();
+      return;
+    }
+    window.location.hash = readHref;
+    setTimeout(() => {
+      if (route().name !== "reader") {
+        render();
+      }
+    }, 0);
+  });
   document.getElementById("detail-uploaded-at").textContent = `上传时间：${formatTime(state.currentBook.uploadedAt)}`;
 
   document.querySelectorAll("[data-export-user]").forEach((button) => {
