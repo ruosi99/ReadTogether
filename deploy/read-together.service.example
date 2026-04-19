@@ -1,0 +1,14 @@
+[Unit]
+Description=Read Together
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/srv/read-together
+EnvironmentFile=/srv/read-together/.env
+ExecStart=/srv/read-together/.venv/bin/python server.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

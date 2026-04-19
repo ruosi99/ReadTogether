@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Read Together</title>
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div>
+          <a class="brand" href="#/">Read Together</a>
+          <p class="subtitle">共享书架、同步批注、双人共读</p>
+        </div>
+        <div class="topbar-actions">
+          <nav class="nav-pill">
+            <a class="nav-link is-active" href="#/">共享书架</a>
+          </nav>
+          <div class="user-switcher" id="user-switcher"></div>
+        </div>
+      </header>
+
+      <main id="app"></main>
+    </div>
+
+    <template id="home-template">
+      <section class="page-grid">
+        <div class="hero-card">
+          <div>
+            <span class="eyebrow">Shared Reading MVP</span>
+            <h1>你们的共读空间已经准备好了</h1>
+            <p>上传一本 EPUB，就能一起阅读、划线、评论，并沉淀各自的笔记。</p>
+          </div>
+          <label class="upload-card">
+            <input id="book-upload" accept=".epub,application/epub+zip" type="file" />
+            <span id="upload-label">上传 EPUB 到共享书架</span>
+            <small>本地先跑通，后续可迁移到云端对象存储和数据库</small>
+          </label>
+        </div>
+
+        <div class="stats-grid" id="summary-grid"></div>
+
+        <section class="section-header">
+          <div>
+            <span class="eyebrow">Library</span>
+            <h2>共享书架</h2>
+          </div>
+          <p id="book-count"></p>
+        </section>
+
+        <div class="book-grid" id="book-grid"></div>
+      </section>
+    </template>
+
+    <template id="detail-template">
+      <section class="page-grid">
+        <a class="back-link" href="#/">返回共享书架</a>
+        <div class="detail-hero">
+          <div class="detail-cover"><span id="detail-cover-text"></span></div>
+          <div class="detail-copy">
+            <span class="eyebrow">Book Detail</span>
+            <h1 id="detail-title"></h1>
+            <p id="detail-author"></p>
+            <div class="detail-actions">
+              <a class="primary-button" id="read-link" href="#">开始共读</a>
+              <button class="secondary-button" data-export-user="you">导出你的笔记</button>
+              <button class="secondary-button" data-export-user="partner">导出男朋友的笔记</button>
+            </div>
+            <small id="detail-uploaded-at"></small>
+          </div>
+        </div>
+        <div class="stats-grid" id="detail-stats"></div>
+        <section class="thread-list">
+          <div class="section-header">
+            <div>
+              <span class="eyebrow">Discussion</span>
+              <h2>最近互动</h2>
+            </div>
+          </div>
+          <div id="detail-threads"></div>
+        </section>
+      </section>
+    </template>
+
+    <template id="reader-template">
+      <section class="reader-layout mobile-reader">
+        <div class="reader-stage">
+          <div class="reader-toolbar compact-toolbar">
+            <a class="back-link" id="reader-back" href="#">返回</a>
+            <div class="toolbar-group">
+              <button class="small-button" data-reader-panel="toc">目录</button>
+              <button class="small-button" data-reader-panel="notes">笔记</button>
+              <button class="small-button" data-reader-panel="settings">设置</button>
+            </div>
+          </div>
+          <div class="reader-surface theme-paper" id="reader-surface">
+            <button class="page-hotzone hotzone-prev" data-hotzone="prev" aria-label="上一页"></button>
+            <button class="page-hotzone hotzone-next" data-hotzone="next" aria-label="下一页"></button>
+            <article class="reader-content" id="reader-content"></article>
+          </div>
+          <div class="reader-progress-dock">
+            <div class="reader-progress-meta" id="reader-progress-meta"></div>
+            <div class="reader-progress-track">
+              <input id="reader-progress-range" type="range" min="0" max="100" value="0" />
+              <div class="reader-progress-markers" id="reader-progress-markers"></div>
+            </div>
+            <div class="reader-progress-value" id="reader-progress-value">0%</div>
+          </div>
+          <input id="profile-name-input" type="hidden" />
+          <input id="profile-avatar-input" type="hidden" />
+          <div class="reader-panel-root" id="reader-panel-root"></div>
+        </div>
+      </section>
+    </template>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
