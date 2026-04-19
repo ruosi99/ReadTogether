@@ -57,6 +57,18 @@ def db_to_api(record: dict[str, Any]) -> dict[str, Any]:
     return transformed
 
 
+def normalize_chapter_title(title: Any, chapter_index: int) -> str:
+    cleaned = str(title or "").strip()
+    if not cleaned:
+        return f"第 {chapter_index + 1} 节"
+    normalized = cleaned.casefold()
+    if normalized in {"未知", "unknown", "untitled", "untitled chapter"}:
+        return f"第 {chapter_index + 1} 节"
+    if "未命名" in cleaned:
+        return f"第 {chapter_index + 1} 节"
+    return cleaned
+
+
 SQLITE_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS books (
     id TEXT PRIMARY KEY,
@@ -466,7 +478,11 @@ class SqliteMetadataStore:
                 (book_id,),
             ).fetchall()
             book["chapters"] = [
-                {"index": chapter["chapter_index"], "title": chapter["title"], "href": chapter["href"]}
+                {
+                    "index": chapter["chapter_index"],
+                    "title": normalize_chapter_title(chapter["title"], chapter["chapter_index"]),
+                    "href": chapter["href"],
+                }
                 for chapter in chapters
             ]
             return book
@@ -486,7 +502,7 @@ class SqliteMetadataStore:
             book["chapters"] = [
                 {
                     "index": row["chapter_index"],
-                    "title": row["title"],
+                    "title": normalize_chapter_title(row["title"], row["chapter_index"]),
                     "href": row["href"],
                     "contentHtml": row["content_html"],
                     "plainText": row["plain_text"],
@@ -509,7 +525,7 @@ class SqliteMetadataStore:
                 raise KeyError(f"{book_id}:{chapter_index}")
             return {
                 "index": row["chapter_index"],
-                "title": row["title"],
+                "title": normalize_chapter_title(row["title"], row["chapter_index"]),
                 "href": row["href"],
                 "contentHtml": row["content_html"],
                 "plainText": row["plain_text"],
@@ -709,7 +725,10 @@ class SqliteMetadataStore:
             return "\n".join(lines)
         chapter_names = {chapter["index"]: chapter["title"] for chapter in book["chapters"]}
         for thread in threads:
-            chapter_title = chapter_names.get(thread["highlight"]["chapterIndex"], "未命名章节")
+            chapter_title = chapter_names.get(
+                thread["highlight"]["chapterIndex"],
+                normalize_chapter_title("", thread["highlight"]["chapterIndex"]),
+            )
             lines.extend(
                 [
                     f"## {chapter_title}",
@@ -925,7 +944,14 @@ class PostgresMetadataStore:
                 "SELECT chapter_index, title, href FROM chapters WHERE book_id = %s ORDER BY chapter_index",
                 (book_id,),
             )
-            book["chapters"] = [{"index": row["chapter_index"], "title": row["title"], "href": row["href"]} for row in chapters]
+            book["chapters"] = [
+                {
+                    "index": row["chapter_index"],
+                    "title": normalize_chapter_title(row["title"], row["chapter_index"]),
+                    "href": row["href"],
+                }
+                for row in chapters
+            ]
             return book
 
     def get_book_content(self, book_id: str) -> dict[str, Any]:
@@ -944,7 +970,7 @@ class PostgresMetadataStore:
             book["chapters"] = [
                 {
                     "index": row["chapter_index"],
-                    "title": row["title"],
+                    "title": normalize_chapter_title(row["title"], row["chapter_index"]),
                     "href": row["href"],
                     "contentHtml": row["content_html"],
                     "plainText": row["plain_text"],
@@ -968,7 +994,7 @@ class PostgresMetadataStore:
                 raise KeyError(f"{book_id}:{chapter_index}")
             return {
                 "index": row["chapter_index"],
-                "title": row["title"],
+                "title": normalize_chapter_title(row["title"], row["chapter_index"]),
                 "href": row["href"],
                 "contentHtml": row["content_html"],
                 "plainText": row["plain_text"],
@@ -1191,7 +1217,10 @@ class PostgresMetadataStore:
             return "\n".join(lines)
         chapter_names = {chapter["index"]: chapter["title"] for chapter in book["chapters"]}
         for thread in threads:
-            chapter_title = chapter_names.get(thread["highlight"]["chapterIndex"], "未命名章节")
+            chapter_title = chapter_names.get(
+                thread["highlight"]["chapterIndex"],
+                normalize_chapter_title("", thread["highlight"]["chapterIndex"]),
+            )
             lines.extend(
                 [
                     f"## {chapter_title}",

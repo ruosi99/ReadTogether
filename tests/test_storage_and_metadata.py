@@ -254,5 +254,35 @@ class StorageAndMetadataTests(unittest.TestCase):
         self.assertEqual(store.list_users()[0]["avatarUrl"], "data:image/png;base64,abc")
 
 
+    def test_placeholder_chapter_titles_are_normalized_for_existing_books(self) -> None:
+        store = SqliteMetadataStore(self.db_path)
+        store.ensure_ready()
+        store.seed_users({"you": {"id": "you", "name": "Reader", "accent": "#c65f2d"}})
+        store.create_book(
+            {
+                "id": "book_placeholder",
+                "title": "Fallback Book",
+                "author": "Tester",
+                "fileName": "fallback.epub",
+                "storageKey": "books/book_placeholder.epub",
+                "uploadedBy": "you",
+                "chapters": [
+                    {
+                        "title": "未知",
+                        "href": "OPS/chapter1.xhtml",
+                        "content_html": "<p>Hello</p>",
+                        "plain_text": "Hello",
+                    }
+                ],
+            }
+        )
+
+        detail = store.get_book_detail("book_placeholder")
+        chapter = store.get_chapter_content("book_placeholder", 0)
+
+        self.assertEqual(detail["chapters"][0]["title"], "第 1 节")
+        self.assertEqual(chapter["title"], "第 1 节")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -281,12 +281,17 @@ body.reader-mode .app-shell {
 }
 
 .reader-content {
+  height: calc(100vh - 198px);
   min-height: calc(100vh - 198px);
+  max-height: calc(100vh - 198px);
   max-width: 760px;
   margin: 0 auto;
-  padding: 18px clamp(20px, 6vw, 54px) 40px;
+  padding: 18px clamp(20px, 6vw, 54px) 0;
   font-size: 1.08rem;
   line-height: 1.8;
+  overflow: hidden;
+  position: relative;
+  z-index: 6;
 }
 
 .reader-content h1,
@@ -304,10 +309,12 @@ body.reader-mode .app-shell {
 }
 
 .reader-page-card {
-  min-height: calc(100vh - 222px);
+  height: 100%;
+  min-height: 100%;
   display: grid;
   grid-template-rows: auto 1fr;
   gap: 18px;
+  overflow: hidden;
 }
 
 .reader-page-head {
@@ -321,22 +328,27 @@ body.reader-mode .app-shell {
 
 .reader-page-body {
   position: relative;
-  min-height: calc(100vh - 320px);
+  height: 100%;
+  min-height: 0;
+  max-height: 100%;
   overflow: hidden;
   user-select: text;
   -webkit-user-select: text;
   -webkit-touch-callout: default;
-  touch-action: pan-y pinch-zoom;
+  touch-action: manipulation;
+  padding-left: 18px;
 }
 
 .reader-page-flow {
   --reader-page-width: 320px;
   height: 100%;
+  max-height: 100%;
   column-width: var(--reader-page-width);
-  column-gap: 32px;
+  column-gap: 24px;
   column-fill: auto;
   transition: transform 160ms ease-out;
   will-change: transform;
+  overflow: hidden;
 }
 
 .reader-page-flow > * {
@@ -348,7 +360,7 @@ body.reader-mode .app-shell {
 .reader-page-flow img {
   display: block;
   max-width: 100%;
-  max-height: 32vh;
+  max-height: 28vh;
   height: auto;
   margin: 14px auto;
   border-radius: 14px;
@@ -495,10 +507,10 @@ body.reader-mode .app-shell {
   position: fixed;
   top: 74px;
   bottom: 124px;
-  width: 22vw;
+  width: min(12vw, 54px);
   border: 0;
   background: transparent;
-  z-index: 5;
+  z-index: 2;
 }
 
 .hotzone-prev {
@@ -660,12 +672,19 @@ body.reader-mode .app-shell {
   }
 
   .reader-content {
-    padding: 16px 18px 56px;
+    height: calc(100vh - 186px);
+    min-height: calc(100vh - 186px);
+    max-height: calc(100vh - 186px);
+    padding: 16px 18px 0;
     font-size: 1rem;
   }
 
   .reader-page-card {
-    min-height: calc(100vh - 210px);
+    min-height: 100%;
+  }
+
+  .reader-page-body {
+    padding-left: 24px;
   }
 
   .reader-progress-dock {

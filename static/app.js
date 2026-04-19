@@ -8,9 +8,6 @@ const state = {
   currentChapterIndex: 0,
   currentPageIndex: 0,
   currentPageCount: 1,
-  currentPages: [],
-  pageCache: {},
-  chapterCache: {},
   theme: "paper",
   pendingSelection: null,
   noteDraft: "",
@@ -23,10 +20,12 @@ const state = {
   selectionListenersBound: false,
   lastRouteHash: "",
   touchSelectionActive: false,
+  chapterCache: {},
+  scrollSyncTimer: null,
 };
 
-const userSwitcher = document.getElementById("user-switcher");
 const app = document.getElementById("app");
+const userSwitcher = document.getElementById("user-switcher");
 
 bootstrap();
 window.addEventListener("hashchange", safeRender);
@@ -44,19 +43,31 @@ async function bootstrap() {
   startEventLoop();
 }
 
+function route() {
+  const hash = window.location.hash || "#/";
+  const segments = hash.slice(2).split("/").filter(Boolean);
+  if (segments[0] === "books" && segments[1] && segments[2] === "read") {
+    return { name: "reader", bookId: segments[1] };
+  }
+  if (segments[0] === "books" && segments[1]) {
+    return { name: "detail", bookId: segments[1] };
+  }
+  return { name: "home" };
+}
+
 function safeRender() {
   render().catch((error) => {
     console.error(error);
     app.innerHTML = `
       <section class="page-grid">
         <div class="empty-card">
-          <h3>打开阅读页时出了点问题</h3>
+          <h3>打开页面时出了点问题</h3>
           <p>${escapeHtml(error?.message || "未知错误")}</p>
-          <button class="primary-button" id="retry-render">重新进入</button>
+          <button class="primary-button" id="retry-render">重新加载</button>
         </div>
       </section>
     `;
-    document.getElementById("retry-render")?.addEventListener("click", () => safeRender());
+    document.getElementById("retry-render")?.addEventListener("click", safeRender);
   });
 }
 
@@ -85,48 +96,33 @@ function partnerUser() {
   return state.users.find((user) => user.id !== state.activeUserId) || state.users[0];
 }
 
-function avatarMarkup(user, extraClass = "") {
-  if (user?.avatarUrl) {
-    return `<span class="avatar ${extraClass}" style="background-image:url('${user.avatarUrl}')"></span>`;
-  }
-  const fallback = escapeHtml((user?.name || "?").slice(0, 1));
-  return `<span class="avatar avatar-fallback ${extraClass}" style="background:${user?.accent || "#9b5b3d"}">${fallback}</span>`;
-}
-
 function renderUserSwitcher() {
   userSwitcher.innerHTML = "";
   state.users.forEach((user) => {
     const button = document.createElement("button");
-    button.className = `user-chip ${state.activeUserId === user.id ? "is-active" : ""}`;
+    button.className = `user-chip ${user.id === state.activeUserId ? "is-active" : ""}`;
     button.innerHTML = `${avatarMarkup(user, "avatar-small")}<span>${escapeHtml(user.name)}</span>`;
-    button.addEventListener("click", () => {
+    button.addEventListener("click", async () => {
       state.activeUserId = user.id;
-      clearPendingSelection();
+      clearPendingSelection(false);
       state.activeReaderPanel = null;
       renderUserSwitcher();
-      render();
+      if (route().name === "reader" && state.currentBook) {
+        const progress = findProgress(state.currentBook, state.activeUserId);
+        await loadCurrentChapter(progress?.chapterIndex || 0, progress?.pageIndex || 0);
+      } else {
+        safeRender();
+      }
     });
     userSwitcher.appendChild(button);
   });
-}
-
-function route() {
-  const hash = window.location.hash || "#/";
-  const segments = hash.slice(2).split("/").filter(Boolean);
-  if (segments[0] === "books" && segments[1] && segments[2] === "read") {
-    return { name: "reader", bookId: segments[1] };
-  }
-  if (segments[0] === "books" && segments[1]) {
-    return { name: "detail", bookId: segments[1] };
-  }
-  return { name: "home" };
 }
 
 async function render() {
   const currentRoute = route();
   document.body.classList.toggle("reader-mode", currentRoute.name === "reader");
   if (currentRoute.name !== "reader") {
-    clearPendingSelection();
+    clearPendingSelection(false);
   }
   if (currentRoute.name === "home") {
     renderHome();
@@ -145,18 +141,23 @@ function renderHome() {
   const partner = partnerUser();
   document.getElementById("book-count").textContent = `${state.books.length} 本书在共享书架中`;
 
-  const summaryGrid = document.getElementById("summary-grid");
-  summaryGrid.innerHTML = [renderPerspectiveSummary(me, true), renderPerspectiveSummary(partner, false)].join("");
+  document.getElementById("summary-grid").innerHTML = [
+    renderPerspectiveSummary(me, true),
+    renderPerspectiveSummary(partner, false),
+  ].join("");
 
   const bookGrid = document.getElementById("book-grid");
   if (!state.books.length) {
-    bookGrid.innerHTML =
-      '<div class="empty-card"><h3>先上传第一本书</h3><p>上传成功后，你们两个人都可以进入同一本书阅读、标注和同步进度。</p></div>';
+    bookGrid.innerHTML = `
+      <div class="empty-card">
+        <h3>先上传第一本书</h3>
+        <p>上传 EPUB 后，你们就可以一起阅读、标注、评论和同步进度。</p>
+      </div>
+    `;
   } else {
     bookGrid.innerHTML = state.books.map((book) => renderBookCard(book, me, partner)).join("");
   }
-
-  document.getElementById("book-upload").addEventListener("change", uploadBook);
+  document.getElementById("book-upload")?.addEventListener("change", uploadBook);
 }
 
 function renderPerspectiveSummary(user, isPrimary) {
@@ -174,8 +175,8 @@ function renderPerspectiveSummary(user, isPrimary) {
 }
 
 function renderBookCard(book, me, partner) {
-  const myProgress = (book.progress || []).find((item) => item.userId === me.id);
-  const partnerProgress = (book.progress || []).find((item) => item.userId === partner.id);
+  const myProgress = findProgress(book, me.id);
+  const otherProgress = findProgress(book, partner.id);
   return `
     <a class="book-card" href="#/books/${book.id}">
       <div class="book-cover"><span>${escapeHtml(book.title.slice(0, 2))}</span></div>
@@ -186,12 +187,12 @@ function renderBookCard(book, me, partner) {
           <div class="progress-panel is-primary">
             <span>${escapeHtml(me.name)}</span>
             <strong>${Math.round(myProgress?.progressPercent || 0)}%</strong>
-            <small>${progressChapter(book, myProgress)}</small>
+            <small>${escapeHtml(progressChapter(book, myProgress))}</small>
           </div>
           <div class="progress-panel">
             <span>${escapeHtml(partner.name)}</span>
-            <strong>${Math.round(partnerProgress?.progressPercent || 0)}%</strong>
-            <small>${progressChapter(book, partnerProgress)}</small>
+            <strong>${Math.round(otherProgress?.progressPercent || 0)}%</strong>
+            <small>${escapeHtml(progressChapter(book, otherProgress))}</small>
           </div>
         </div>
         <small>标注 ${book.annotationCount || 0} 条 · ${formatTime(book.uploadedAt)}</small>
@@ -204,19 +205,22 @@ async function renderDetail(bookId) {
   state.currentBook = await api(`/api/books/${bookId}`);
   state.currentThreads = (await api(`/api/books/${bookId}/threads`)).threads;
   const me = activeUser();
-  const partner = partnerUser();
+  const other = partnerUser();
+
   app.innerHTML = document.getElementById("detail-template").innerHTML;
   document.getElementById("detail-cover-text").textContent = state.currentBook.title.slice(0, 2);
   document.getElementById("detail-title").textContent = state.currentBook.title;
   document.getElementById("detail-author").textContent = state.currentBook.author;
+  document.getElementById("detail-uploaded-at").textContent = `上传时间：${formatTime(state.currentBook.uploadedAt)}`;
+
   const readHref = `#/books/${bookId}/read`;
   const readLink = document.getElementById("read-link");
   readLink.href = readHref;
+  readLink.textContent = "开始共读";
   readLink.addEventListener("click", (event) => {
     event.preventDefault();
     navigateTo(readHref);
   });
-  document.getElementById("detail-uploaded-at").textContent = `上传时间：${formatTime(state.currentBook.uploadedAt)}`;
 
   document.querySelectorAll("[data-export-user]").forEach((button) => {
     const exportUserId = button.dataset.exportUser;
@@ -228,18 +232,18 @@ async function renderDetail(bookId) {
     });
   });
 
-  const myProgress = (state.currentBook.progress || []).find((item) => item.userId === me.id);
-  const partnerProgress = (state.currentBook.progress || []).find((item) => item.userId === partner.id);
+  const myProgress = findProgress(state.currentBook, me.id);
+  const otherProgress = findProgress(state.currentBook, other.id);
   document.getElementById("detail-stats").innerHTML = `
     <article class="stat-card is-primary">
       <span>${escapeHtml(me.name)}的主视角</span>
       <strong>${Math.round(myProgress?.progressPercent || 0)}%</strong>
-      <small>${progressChapter(state.currentBook, myProgress)}</small>
+      <small>${escapeHtml(progressChapter(state.currentBook, myProgress))}</small>
     </article>
     <article class="stat-card">
-      <span>${escapeHtml(partner.name)}的陪读进度</span>
-      <strong>${Math.round(partnerProgress?.progressPercent || 0)}%</strong>
-      <small>${progressChapter(state.currentBook, partnerProgress)}</small>
+      <span>${escapeHtml(other.name)}的陪读进度</span>
+      <strong>${Math.round(otherProgress?.progressPercent || 0)}%</strong>
+      <small>${escapeHtml(progressChapter(state.currentBook, otherProgress))}</small>
     </article>
     <article class="stat-card">
       <span>总标注数</span>
@@ -250,8 +254,12 @@ async function renderDetail(bookId) {
 
   const detailThreads = document.getElementById("detail-threads");
   if (!state.currentThreads.length) {
-    detailThreads.innerHTML =
-      '<div class="empty-card"><h3>还没有标注</h3><p>进入阅读器后选中一句喜欢的内容，你们的共读互动就会出现在这里。</p></div>';
+    detailThreads.innerHTML = `
+      <div class="empty-card">
+        <h3>还没有标注</h3>
+        <p>进入阅读器后选中一句内容，就能开始共读互动。</p>
+      </div>
+    `;
     return;
   }
   detailThreads.innerHTML = state.currentThreads.slice(0, 8).map((thread) => renderThreadCard(thread, me.id, false)).join("");
@@ -260,30 +268,52 @@ async function renderDetail(bookId) {
 async function renderReader(bookId) {
   state.currentBook = await api(`/api/books/${bookId}`);
   state.currentThreads = (await api(`/api/books/${bookId}/threads`)).threads;
-  const currentProgress = (state.currentBook.progress || []).find((item) => item.userId === state.activeUserId);
+  state.chapterCache = {};
+
+  const currentProgress = findProgress(state.currentBook, state.activeUserId);
   state.currentChapterIndex = currentProgress?.chapterIndex || 0;
   state.currentPageIndex = currentProgress?.pageIndex || 0;
   state.currentPageCount = Math.max(1, currentProgress?.pageCount || 1);
-  state.pageCache = {};
-  state.chapterCache = {};
   app.innerHTML = document.getElementById("reader-template").innerHTML;
+
   attachReaderControls();
   ensureReaderSelectionListeners();
   await loadCurrentChapter(state.currentChapterIndex, state.currentPageIndex);
 }
 
 function attachReaderControls() {
-  document.getElementById("reader-back").href = `#/books/${state.currentBook.id}`;
+  const back = document.getElementById("reader-back");
+  if (back) {
+    back.href = `#/books/${state.currentBook.id}`;
+    back.textContent = "返回";
+  }
   document.querySelectorAll("[data-reader-panel]").forEach((button) => {
+    if (button.dataset.readerPanel === "toc") {
+      button.textContent = "目录";
+    }
+    if (button.dataset.readerPanel === "notes") {
+      button.textContent = "标注";
+    }
+    if (button.dataset.readerPanel === "settings") {
+      button.textContent = "设置";
+    }
     button.addEventListener("click", () => toggleReaderPanel(button.dataset.readerPanel));
   });
+
   const surface = document.getElementById("reader-surface");
-  surface.addEventListener("touchstart", handleTouchStart, { passive: true });
-  surface.addEventListener("touchend", handleTouchEnd, { passive: true });
+  surface?.addEventListener("touchstart", handleTouchStart, { passive: true });
+  surface?.addEventListener("touchend", handleTouchEnd, { passive: true });
+
   document.querySelectorAll("[data-hotzone]").forEach((zone) => {
-    zone.addEventListener("click", () => stepReaderPage(zone.dataset.hotzone === "next" ? 1 : -1));
+    zone.addEventListener("click", () => {
+      if (window.getSelection?.()?.toString().trim()) {
+        return;
+      }
+      stepReaderPage(zone.dataset.hotzone === "next" ? 1 : -1);
+    });
   });
-  document.getElementById("reader-progress-range").addEventListener("input", handleProgressJump);
+
+  document.getElementById("reader-progress-range")?.addEventListener("input", handleProgressJump);
 }
 
 function ensureReaderSelectionListeners() {
@@ -299,8 +329,10 @@ function ensureReaderSelectionListeners() {
       if (state.pendingSelection?.source === "selection") {
         clearPendingSelection(false);
       }
+      state.touchSelectionActive = false;
       return;
     }
+    state.touchSelectionActive = true;
   });
   state.selectionListenersBound = true;
 }
@@ -316,7 +348,10 @@ async function loadCurrentChapter(chapterIndex, preferredPageIndex = 0) {
   if (!state.chapterCache[cacheKey]) {
     state.chapterCache[cacheKey] = await api(`/api/books/${state.currentBook.id}/chapters/${nextChapterIndex}`);
   }
-  state.currentChapter = state.chapterCache[cacheKey];
+  state.currentChapter = {
+    ...state.chapterCache[cacheKey],
+    title: normalizeChapterTitle(state.chapterCache[cacheKey].title, nextChapterIndex),
+  };
   state.currentPageIndex = Math.max(0, preferredPageIndex || 0);
   clearPendingSelection(false);
   drawReaderPage();
@@ -330,8 +365,10 @@ function drawReaderPage() {
   }
   const surface = document.getElementById("reader-surface");
   const content = document.getElementById("reader-content");
+  if (!surface || !content) {
+    return;
+  }
   surface.className = `reader-surface theme-${state.theme}`;
-
   content.innerHTML = renderReaderPageMarkup(chapter);
   bindSelectionSurface();
   applyHighlights(document.getElementById("reader-page-body"), currentChapterThreads());
@@ -340,29 +377,17 @@ function drawReaderPage() {
 }
 
 function renderReaderPageMarkup(chapter) {
-  const fragmentsHtml = "";
-
+  const title = displayChapterTitle(chapter.title, state.currentChapterIndex);
   return `
     <section class="reader-page-card">
       <header class="reader-page-head">
-        <span class="eyebrow">Chapter ${state.currentChapterIndex + 1}</span>
-        <h1>${escapeHtml(chapter.title)}</h1>
+        <span class="eyebrow">第 ${state.currentChapterIndex + 1} 章</span>
+        ${title ? `<h1>${escapeHtml(title)}</h1>` : ""}
         <small>Page ${state.currentPageIndex + 1} / ${state.currentPageCount}</small>
       </header>
       <div class="reader-page-body" id="reader-page-body">
         <div class="reader-page-flow" id="reader-page-flow">${chapter.contentHtml || ""}</div>
       </div>
-    </section>
-  `;
-
-  return `
-    <section class="reader-page-card">
-      <header class="reader-page-head">
-        <span class="eyebrow">第 ${state.currentChapterIndex + 1} 章</span>
-        <h1>${escapeHtml(chapter.title)}</h1>
-        <small>第 ${state.currentPageIndex + 1} / ${state.currentPageCount} 页</small>
-      </header>
-      <div class="reader-page-body" id="reader-page-body">${fragmentsHtml}</div>
     </section>
   `;
 }
@@ -384,12 +409,24 @@ async function settleChapterPagination() {
   if (!body || !flow) {
     return;
   }
-  const gap = 32;
-  flow.style.setProperty("--reader-page-width", `${body.clientWidth}px`);
-  const totalWidth = Math.max(body.clientWidth, flow.scrollWidth);
-  state.currentPageCount = Math.max(1, Math.ceil((totalWidth + gap) / (body.clientWidth + gap)));
-  state.currentPageIndex = clamp(state.currentPageIndex, 0, state.currentPageCount - 1);
-  flow.style.transform = `translateX(-${state.currentPageIndex * (body.clientWidth + gap)}px)`;
+
+  const bodyWidth = Math.max(1, body.clientWidth);
+  const bodyHeight = Math.max(1, body.clientHeight);
+  const gap = 24;
+
+  flow.style.setProperty("--reader-page-width", `${bodyWidth}px`);
+  flow.style.height = `${bodyHeight}px`;
+  flow.style.maxHeight = `${bodyHeight}px`;
+  flow.style.minHeight = `${bodyHeight}px`;
+
+  await nextFrame();
+
+  const totalWidth = Math.max(bodyWidth, flow.scrollWidth);
+  const computedPageCount = Math.max(1, Math.ceil((totalWidth + gap) / (bodyWidth + gap)));
+  state.currentPageCount = computedPageCount;
+  state.currentPageIndex = clamp(state.currentPageIndex, 0, computedPageCount - 1);
+  flow.style.transform = `translateX(-${state.currentPageIndex * (bodyWidth + gap)}px)`;
+
   renderReaderProgress();
   renderReaderPanel();
   scheduleProgressSync();
@@ -399,7 +436,7 @@ function queueSelectionCapture() {
   if (state.selectionCaptureTimer) {
     clearTimeout(state.selectionCaptureTimer);
   }
-  state.selectionCaptureTimer = window.setTimeout(captureSelection, 180);
+  state.selectionCaptureTimer = window.setTimeout(captureSelection, 220);
 }
 
 function captureSelection() {
@@ -460,6 +497,7 @@ function absoluteOffsetFromNode(node, offset) {
     }
     return total;
   }
+
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   while (walker.nextNode()) {
     const textNode = walker.currentNode;
@@ -472,9 +510,7 @@ function absoluteOffsetFromNode(node, offset) {
 }
 
 function currentChapterThreads() {
-  return state.currentThreads.filter((thread) => {
-    return thread.highlight.chapterIndex === state.currentChapterIndex;
-  });
+  return state.currentThreads.filter((thread) => thread.highlight.chapterIndex === state.currentChapterIndex);
 }
 
 function applyHighlights(container, threads) {
@@ -489,7 +525,7 @@ function applyHighlights(container, threads) {
       thread.highlight.endOffset,
       thread.highlight.color,
       (thread.annotation?.userId || thread.highlight.userId) === state.activeUserId,
-      Boolean(thread.annotation)
+      Boolean(thread.annotation),
     );
   });
 }
@@ -534,24 +570,27 @@ function wrapTextRange(root, start, end, color, isPrimary, hasNote) {
 
 function renderReaderProgress() {
   const me = activeUser();
-  const partner = partnerUser();
-  const myProgress = (state.currentBook.progress || []).find((item) => item.userId === me.id);
-  const partnerProgress = (state.currentBook.progress || []).find((item) => item.userId === partner.id);
+  const other = partnerUser();
+  const myProgress = findProgress(state.currentBook, me.id);
+  const otherProgress = findProgress(state.currentBook, other.id);
   const currentPercent = computeCurrentPercent();
-  const progressRange = document.getElementById("reader-progress-range");
-  progressRange.value = String(Math.round(currentPercent));
+
+  const range = document.getElementById("reader-progress-range");
+  if (range) {
+    range.value = String(Math.round(currentPercent));
+  }
   document.getElementById("reader-progress-value").textContent = `${Math.round(currentPercent)}%`;
   document.getElementById("reader-progress-markers").innerHTML = `
     <button class="progress-avatar is-primary" style="left:${currentPercent}%;" title="${escapeHtml(me.name)}">
       ${avatarMarkup(me)}
     </button>
-    <button class="progress-avatar" style="left:${Math.round(partnerProgress?.progressPercent || 0)}%;" title="${escapeHtml(partner.name)}">
-      ${avatarMarkup(partner)}
+    <button class="progress-avatar" style="left:${Math.round(otherProgress?.progressPercent || 0)}%;" title="${escapeHtml(other.name)}">
+      ${avatarMarkup(other)}
     </button>
   `;
   document.getElementById("reader-progress-meta").innerHTML = `
     <span>${escapeHtml(progressChapter(state.currentBook, myProgress))}</span>
-    <span>${escapeHtml(partner.name)} ${Math.round(partnerProgress?.progressPercent || 0)}%</span>
+    <span>${escapeHtml(other.name)} ${Math.round(otherProgress?.progressPercent || 0)}%</span>
   `;
 }
 
@@ -582,7 +621,7 @@ function renderReaderPanel() {
 }
 
 function toggleReaderPanel(panelName) {
-  clearPendingSelection();
+  clearPendingSelection(false);
   state.activeReaderPanel = state.activeReaderPanel === panelName ? null : panelName;
   renderReaderPanel();
 }
@@ -596,13 +635,9 @@ function renderSelectionSheet() {
         <button class="small-button" data-close-sheet="true">关闭</button>
       </div>
       <p class="quote-text">${escapeHtml(state.pendingSelection.quote)}</p>
-      <textarea id="note-draft" placeholder="${isExistingHighlight ? "写下这条高亮的想法..." : "如果想写批注，可以直接输入内容..."}">${escapeHtml(state.noteDraft)}</textarea>
+      <textarea id="note-draft" placeholder="${isExistingHighlight ? "给这条高亮补一句批注..." : "如果想写批注，可以直接输入内容..."}">${escapeHtml(state.noteDraft)}</textarea>
       <div class="selection-actions">
-        ${
-          isExistingHighlight
-            ? ""
-            : '<button class="secondary-button" id="save-highlight-only">仅高亮</button>'
-        }
+        ${isExistingHighlight ? "" : '<button class="secondary-button" id="save-highlight-only">仅高亮</button>'}
         <button class="primary-button" id="save-note">${isExistingHighlight ? "保存批注" : "高亮并写批注"}</button>
       </div>
     </div>
@@ -627,14 +662,15 @@ function renderTocSheet() {
       </div>
       <div class="toc-list">
         ${state.currentBook.chapters
-          .map(
-            (chapter, index) => `
+          .map((chapter, index) => {
+            const title = normalizeChapterTitle(chapter.title, index);
+            return `
               <button class="toc-item ${index === state.currentChapterIndex ? "is-active" : ""}" data-chapter-index="${index}">
                 <span>第 ${index + 1} 章</span>
-                <strong>${escapeHtml(chapter.title)}</strong>
+                <strong>${escapeHtml(title)}</strong>
               </button>
-            `
-          )
+            `;
+          })
           .join("")}
       </div>
     </div>
@@ -647,7 +683,9 @@ function bindTocSheet() {
     renderReaderPanel();
   });
   document.querySelectorAll("[data-chapter-index]").forEach((button) => {
-    button.addEventListener("click", () => jumpToChapter(Number(button.dataset.chapterIndex), 0));
+    button.addEventListener("click", async () => {
+      await jumpToChapter(Number(button.dataset.chapterIndex), 0);
+    });
   });
 }
 
@@ -662,7 +700,7 @@ function renderNotesSheet() {
         ${
           state.currentThreads.length
             ? state.currentThreads.map((thread) => renderThreadCard(thread, state.activeUserId, true)).join("")
-            : '<p class="muted-text">还没有标注，先在正文里选一句你们想留下来的内容吧。</p>'
+            : '<p class="muted-text">还没有标注，先在正文里选一句内容吧。</p>'
         }
       </div>
     </div>
@@ -674,12 +712,16 @@ function bindNotesSheet() {
     state.activeReaderPanel = null;
     renderReaderPanel();
   });
-  document.querySelectorAll("[data-comment-annotation]").forEach((button) => {
-    const annotationId = button.dataset.commentAnnotation;
-    document.querySelector(`[data-comment-input="${annotationId}"]`)?.addEventListener("input", (event) => {
-      state.commentDrafts[annotationId] = event.target.value;
+
+  document.querySelectorAll("[data-comment-input]").forEach((input) => {
+    input.addEventListener("input", (event) => {
+      state.commentDrafts[input.dataset.commentInput] = event.target.value;
     });
+  });
+
+  document.querySelectorAll("[data-comment-annotation]").forEach((button) => {
     button.addEventListener("click", async () => {
+      const annotationId = button.dataset.commentAnnotation;
       const body = (state.commentDrafts[annotationId] || "").trim();
       if (!body) {
         return;
@@ -698,10 +740,10 @@ function bindNotesSheet() {
       renderReaderPanel();
     });
   });
+
   document.querySelectorAll("[data-note-highlight]").forEach((button) => {
-    const highlightId = button.dataset.noteHighlight;
     button.addEventListener("click", () => {
-      const thread = state.currentThreads.find((item) => item.highlight.id === highlightId);
+      const thread = state.currentThreads.find((item) => item.highlight.id === button.dataset.noteHighlight);
       if (!thread) {
         return;
       }
@@ -738,7 +780,7 @@ function renderSettingsSheet() {
           ${avatarMarkup(me, "avatar-large")}
           <div>
             <strong>${escapeHtml(me.name)}</strong>
-            <small>用于进度条和标注归属显示</small>
+            <small>用于底部进度条和标注归属显示</small>
           </div>
         </div>
         <label class="profile-field">
@@ -761,9 +803,10 @@ function bindSettingsSheet() {
     renderReaderPanel();
   });
   document.querySelectorAll(".reader-sheet [data-theme]").forEach((button) => {
-    button.addEventListener("click", () => {
+    button.addEventListener("click", async () => {
       state.theme = button.dataset.theme;
       drawReaderPage();
+      await settleChapterPagination();
     });
   });
   document.getElementById("profile-avatar-input-sheet")?.addEventListener("change", handleAvatarPick);
@@ -776,17 +819,17 @@ async function refreshThreads() {
 
 async function refreshBookSummary(bookId) {
   const detail = await api(`/api/books/${bookId}`);
-  const existingIndex = state.books.findIndex((book) => book.id === bookId);
-  if (existingIndex >= 0) {
-    state.books[existingIndex] = { ...state.books[existingIndex], ...detail };
+  const index = state.books.findIndex((book) => book.id === bookId);
+  if (index >= 0) {
+    state.books[index] = { ...state.books[index], ...detail };
   }
   if (state.currentBook && state.currentBook.id === bookId) {
-    state.currentBook = { ...state.currentBook, ...detail, chapters: state.currentBook.chapters };
+    state.currentBook = detail;
   }
 }
 
 async function uploadBook(event) {
-  const file = event.target.files[0];
+  const file = event.target.files?.[0];
   if (!file) {
     return;
   }
@@ -794,7 +837,9 @@ async function uploadBook(event) {
   formData.set("file", file);
   formData.set("uploadedBy", state.activeUserId);
   const uploadLabel = document.getElementById("upload-label");
-  uploadLabel.textContent = "正在导入 EPUB...";
+  if (uploadLabel) {
+    uploadLabel.textContent = "正在导入 EPUB...";
+  }
   try {
     const response = await fetch("/api/books/upload", { method: "POST", body: formData });
     const payload = await response.json();
@@ -806,7 +851,9 @@ async function uploadBook(event) {
   } catch (error) {
     alert(error.message);
   } finally {
-    uploadLabel.textContent = "上传 EPUB 到共享书架";
+    if (uploadLabel) {
+      uploadLabel.textContent = "上传 EPUB 到共享书架";
+    }
     event.target.value = "";
   }
 }
@@ -881,7 +928,7 @@ function scheduleProgressSync() {
   if (state.scrollSyncTimer) {
     clearTimeout(state.scrollSyncTimer);
   }
-  state.scrollSyncTimer = setTimeout(syncProgress, 80);
+  state.scrollSyncTimer = window.setTimeout(syncProgress, 80);
 }
 
 async function syncProgress() {
@@ -931,12 +978,16 @@ function stepReaderPage(step) {
   }
   state.currentPageIndex = target;
   clearPendingSelection(false);
-  settleChapterPagination();
+  shiftReaderPage();
 }
 
 async function jumpToChapter(chapterIndex, pageFraction = 0) {
   const nextChapter = clamp(chapterIndex, 0, state.currentBook.chapters.length - 1);
-  const fallbackPage = clamp(Math.round(pageFraction * Math.max(0, state.currentPageCount - 1)), 0, Math.max(0, state.currentPageCount - 1));
+  const fallbackPage = clamp(
+    Math.round(pageFraction * Math.max(0, state.currentPageCount - 1)),
+    0,
+    Math.max(0, state.currentPageCount - 1),
+  );
   state.activeReaderPanel = null;
   await loadCurrentChapter(nextChapter, fallbackPage);
 }
@@ -955,11 +1006,17 @@ function handleTouchStart(event) {
   if (!touch) {
     return;
   }
+  const body = document.getElementById("reader-page-body");
+  const rect = body?.getBoundingClientRect();
+  const leftSafe = rect ? touch.clientX - rect.left <= 56 : false;
+  const rightSafe = rect ? rect.right - touch.clientX <= 24 : false;
   state.touchStart = {
     x: touch.clientX,
     y: touch.clientY,
     startedInPageBody: Boolean(event.target?.closest?.("#reader-page-body")),
     startedAt: Date.now(),
+    startedNearSelectionEdge: leftSafe,
+    startedNearRightEdge: rightSafe,
   };
 }
 
@@ -968,28 +1025,38 @@ function handleTouchEnd(event) {
   if (!touch || !state.touchStart) {
     return;
   }
+
   const selectedText = window.getSelection?.()?.toString().trim() || "";
   if (state.pendingSelection || state.touchSelectionActive || selectedText.length >= 2) {
     queueSelectionCapture();
     state.touchStart = null;
     return;
   }
+
   const dx = touch.clientX - state.touchStart.x;
   const dy = touch.clientY - state.touchStart.y;
   const duration = Date.now() - state.touchStart.startedAt;
-  if (state.touchStart.startedInPageBody && duration > 180) {
-    state.touchStart = null;
-    return;
+
+  if (state.touchStart.startedInPageBody) {
+    if (state.touchStart.startedNearSelectionEdge) {
+      state.touchStart = null;
+      return;
+    }
+    if (duration > 140) {
+      state.touchStart = null;
+      return;
+    }
+    if (Math.abs(dy) > Math.abs(dx)) {
+      state.touchStart = null;
+      return;
+    }
+    if (Math.abs(dx) < 90) {
+      state.touchStart = null;
+      return;
+    }
   }
-  if (state.touchStart.startedInPageBody && Math.abs(dx) < 24 && Math.abs(dy) < 24) {
-    state.touchStart = null;
-    return;
-  }
-  if (state.touchStart.startedInPageBody && Math.abs(dx) < 72) {
-    state.touchStart = null;
-    return;
-  }
-  if (Math.abs(dx) > 42 && Math.abs(dx) > Math.abs(dy)) {
+
+  if (Math.abs(dx) > 48 && Math.abs(dx) > Math.abs(dy) * 1.25) {
     stepReaderPage(dx < 0 ? 1 : -1);
   }
   state.touchStart = null;
@@ -1027,16 +1094,17 @@ async function saveProfile() {
     renderReaderPanel();
     renderReaderProgress();
   } else {
-    render();
+    safeRender();
   }
 }
 
 function renderThreadCard(thread, primaryUserId, showComposer) {
   const ownerId = thread.annotation?.userId || thread.highlight.userId;
-  const owner = state.users.find((user) => user.id === ownerId) || { name: "成员" };
+  const owner = state.users.find((user) => user.id === ownerId) || { name: "成员", accent: "#9b5b3d" };
   const chapterTitle = chapterName(thread.highlight.chapterIndex);
   const isPrimary = ownerId === primaryUserId;
   const hasNote = Boolean(thread.annotation);
+
   return `
     <article class="thread-card ${isPrimary ? "is-primary" : ""} ${hasNote ? "" : "thread-highlight-only"}">
       <div class="thread-head">
@@ -1056,7 +1124,7 @@ function renderThreadCard(thread, primaryUserId, showComposer) {
             <div class="comment-list">
               ${thread.comments
                 .map((comment) => {
-                  const commentOwner = state.users.find((user) => user.id === comment.userId) || { name: "成员" };
+                  const commentOwner = state.users.find((user) => user.id === comment.userId) || { name: "成员", accent: "#9b5b3d" };
                   return `<div class="comment-item"><strong>${avatarMarkup(commentOwner, "avatar-inline")} ${escapeHtml(commentOwner.name)}</strong><p>${escapeHtml(comment.body)}</p></div>`;
                 })
                 .join("")}
@@ -1067,10 +1135,12 @@ function renderThreadCard(thread, primaryUserId, showComposer) {
       ${
         showComposer
           ? hasNote
-            ? `<div class="comment-composer">
-                 <input data-comment-input="${thread.annotation.id}" placeholder="继续聊聊这段内容..." value="${escapeHtml(state.commentDrafts[thread.annotation.id] || "")}" />
-                 <button class="secondary-button ${isPrimary ? "is-primary" : ""}" data-comment-annotation="${thread.annotation.id}">评论</button>
-               </div>`
+            ? `
+                <div class="comment-composer">
+                  <input data-comment-input="${thread.annotation.id}" placeholder="继续聊聊这段内容..." value="${escapeHtml(state.commentDrafts[thread.annotation.id] || "")}" />
+                  <button class="secondary-button ${isPrimary ? "is-primary" : ""}" data-comment-annotation="${thread.annotation.id}">评论</button>
+                </div>
+              `
             : `<button class="secondary-button ${isPrimary ? "is-primary" : ""}" data-note-highlight="${thread.highlight.id}">补写批注</button>`
           : ""
       }
@@ -1099,6 +1169,7 @@ function handleEvent(event) {
       state.books.unshift(event.payload.book);
     }
   }
+
   if (event.type === "user.updated") {
     state.users = state.users.map((user) => (user.id === event.payload.user.id ? event.payload.user : user));
     renderUserSwitcher();
@@ -1107,6 +1178,7 @@ function handleEvent(event) {
       renderReaderProgress();
     }
   }
+
   if (event.type === "progress.updated") {
     const book = state.books.find((item) => item.id === event.payload.bookId);
     if (book) {
@@ -1121,21 +1193,22 @@ function handleEvent(event) {
       }
     }
   }
+
   if (event.type === "highlight.created" || event.type === "annotation.created" || event.type === "comment.created") {
-    refreshBookSummary(event.payload.bookId).then(() => {
+    refreshBookSummary(event.payload.bookId).then(async () => {
       if (state.currentBook && state.currentBook.id === event.payload.bookId) {
-        refreshThreads().then(() => {
-          if (route().name === "reader") {
-            drawReaderPage();
-          } else if (route().name === "detail") {
-            renderDetail(state.currentBook.id);
-          }
-        });
+        await refreshThreads();
+        if (route().name === "reader") {
+          drawReaderPage();
+        } else if (route().name === "detail") {
+          renderDetail(state.currentBook.id);
+        }
       } else if (route().name === "home") {
         renderHome();
       }
     });
   }
+
   if (route().name === "home") {
     renderHome();
   }
@@ -1154,18 +1227,63 @@ async function api(url, options = {}) {
   return payload;
 }
 
+function findProgress(book, userId) {
+  return (book?.progress || []).find((item) => item.userId === userId);
+}
+
 function progressChapter(book, progress) {
   if (!progress || progress.chapterIndex == null) {
     return "还没开始阅读";
   }
-  return book.chapters?.[progress.chapterIndex]?.title || `第 ${progress.chapterIndex + 1} 章`;
+  return chapterTitleFromBook(book, progress.chapterIndex);
 }
 
 function chapterName(index) {
-  if (index == null || !state.currentBook?.chapters?.[index]) {
+  if (index == null) {
     return "还没开始阅读";
   }
-  return state.currentBook.chapters[index].title;
+  return chapterTitleFromBook(state.currentBook, index);
+}
+
+function chapterTitleFromBook(book, index) {
+  const rawTitle = book?.chapters?.[index]?.title;
+  return normalizeChapterTitle(rawTitle, index);
+}
+
+function normalizeChapterTitle(title, chapterIndex) {
+  const cleaned = String(title || "").trim();
+  if (!cleaned) {
+    return `第 ${chapterIndex + 1} 节`;
+  }
+  const lower = cleaned.toLowerCase();
+  if (cleaned === "未知" || cleaned.includes("未命名") || lower === "unknown" || lower === "untitled" || lower === "untitled chapter") {
+    return `第 ${chapterIndex + 1} 节`;
+  }
+  return cleaned;
+}
+
+function displayChapterTitle(title, chapterIndex) {
+  const cleaned = String(title || "").trim();
+  if (!cleaned) {
+    return "";
+  }
+  const normalized = normalizeChapterTitle(cleaned, chapterIndex);
+  if (normalized === `第 ${chapterIndex + 1} 节`) {
+    return "";
+  }
+  return normalized;
+}
+
+function shiftReaderPage() {
+  const body = document.getElementById("reader-page-body");
+  const flow = document.getElementById("reader-page-flow");
+  if (!body || !flow) {
+    return;
+  }
+  const gap = 24;
+  flow.style.transform = `translateX(-${state.currentPageIndex * (body.clientWidth + gap)}px)`;
+  renderReaderProgress();
+  scheduleProgressSync();
 }
 
 function formatTime(value) {
@@ -1178,11 +1296,11 @@ function formatTime(value) {
 }
 
 function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 function nextFrame() {
-  return new Promise((resolve) => window.requestAnimationFrame(() => resolve()));
+  return new Promise((resolve) => window.requestAnimationFrame(resolve));
 }
 
 function readFileAsDataUrl(file) {
@@ -1192,6 +1310,14 @@ function readFileAsDataUrl(file) {
     reader.onerror = () => reject(reader.error);
     reader.readAsDataURL(file);
   });
+}
+
+function avatarMarkup(user, extraClass = "") {
+  if (user?.avatarUrl) {
+    return `<span class="avatar ${extraClass}" style="background-image:url('${user.avatarUrl}')"></span>`;
+  }
+  const fallback = escapeHtml((user?.name || "?").slice(0, 1));
+  return `<span class="avatar avatar-fallback ${extraClass}" style="background:${user?.accent || "#9b5b3d"}">${fallback}</span>`;
 }
 
 function escapeHtml(text) {
@@ -1204,66 +1330,4 @@ function escapeHtml(text) {
 
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
-}
-
-function readerViewportSignature() {
-  const metrics = getReaderMetrics();
-  return `${metrics.width}x${metrics.height}`;
-}
-
-function getReaderMetrics() {
-  const surface = document.getElementById("reader-surface");
-  const width = Math.min(760, Math.max(260, (surface?.clientWidth || window.innerWidth) - 40));
-  const height = Math.max(320, window.innerHeight - 74 - 124 - 44);
-  return { width, height };
-}
-
-function paginateChapter(chapter, metrics) {
-  const text = String(chapter.plainText || "").replace(/\r\n/g, "\n").trim();
-  if (!text) {
-    return [{ startOffset: 0, endOffset: 0, fragments: [{ text: "", startOffset: 0, endOffset: 0 }] }];
-  }
-  const maxCharsPerPage = estimateCharsPerPage(metrics);
-  const pages = [];
-  let start = 0;
-  while (start < text.length) {
-    const targetEnd = Math.min(text.length, start + maxCharsPerPage);
-    const end = targetEnd >= text.length ? text.length : normalizeSliceLength(text, targetEnd, start);
-    const pageText = text.slice(start, end).trim();
-    const trimmedLeading = text.slice(start, end).match(/^\s*/)?.[0].length || 0;
-    const effectiveStart = start + trimmedLeading;
-    pages.push({
-      startOffset: effectiveStart,
-      endOffset: effectiveStart + pageText.length,
-      fragments: [{ text: pageText, startOffset: effectiveStart, endOffset: effectiveStart + pageText.length }],
-    });
-    start = end;
-    while (/\s/.test(text[start] || "")) {
-      start += 1;
-    }
-  }
-  return pages;
-}
-
-function estimateCharsPerPage(metrics) {
-  const charsPerLine = Math.max(12, Math.floor(metrics.width / 18));
-  const lineHeight = 31;
-  const usableHeight = Math.max(220, metrics.height - 84);
-  const lineCount = Math.max(8, Math.floor(usableHeight / lineHeight));
-  return charsPerLine * lineCount;
-}
-
-function normalizeSliceLength(text, length, floor = 0) {
-  const start = Math.max(floor + 1, length - 48);
-  for (let index = length; index >= start; index -= 1) {
-    if (/[\s，。！？；、,.!?;:]/.test(text[index] || "")) {
-      return index + 1;
-    }
-  }
-  return Math.max(floor + 1, length);
-}
-
-function trimLeadingWhitespace(text) {
-  const match = text.match(/^\s*/)?.[0] || "";
-  return { text: text.slice(match.length), trimmedCount: match.length };
 }
