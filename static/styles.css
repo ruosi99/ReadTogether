@@ -329,6 +329,8 @@ body.reader-mode .app-shell {
   gap: 14px;
   user-select: text;
   -webkit-user-select: text;
+  -webkit-touch-callout: default;
+  touch-action: pan-y pinch-zoom;
 }
 
 .reader-page-fragment {

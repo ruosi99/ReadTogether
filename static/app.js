@@ -20,6 +20,7 @@ const state = {
   selectionCaptureTimer: null,
   selectionListenersBound: false,
   lastRouteHash: "",
+  touchSelectionActive: false,
 };
 
 const userSwitcher = document.getElementById("user-switcher");
@@ -378,7 +379,7 @@ function queueSelectionCapture() {
   if (state.selectionCaptureTimer) {
     clearTimeout(state.selectionCaptureTimer);
   }
-  state.selectionCaptureTimer = window.setTimeout(captureSelection, 40);
+  state.selectionCaptureTimer = window.setTimeout(captureSelection, 180);
 }
 
 function captureSelection() {
@@ -387,6 +388,7 @@ function captureSelection() {
   }
   const selection = window.getSelection();
   if (!selection || selection.rangeCount === 0 || selection.isCollapsed) {
+    state.touchSelectionActive = false;
     return;
   }
   const range = selection.getRangeAt(0);
@@ -400,9 +402,11 @@ function captureSelection() {
     return;
   }
   const quote = selection.toString().trim();
-  if (!quote) {
+  if (!quote || quote.length < 2) {
+    state.touchSelectionActive = false;
     return;
   }
+  state.touchSelectionActive = true;
   state.pendingSelection = {
     source: "selection",
     chapterIndex: state.currentChapterIndex,
@@ -854,6 +858,7 @@ async function saveAnnotation() {
 function clearPendingSelection(shouldRender = true) {
   state.pendingSelection = null;
   state.noteDraft = "";
+  state.touchSelectionActive = false;
   try {
     window.getSelection()?.removeAllRanges();
   } catch {}
@@ -944,7 +949,11 @@ function handleTouchStart(event) {
   if (!touch) {
     return;
   }
-  state.touchStart = { x: touch.clientX, y: touch.clientY };
+  state.touchStart = {
+    x: touch.clientX,
+    y: touch.clientY,
+    startedInPageBody: Boolean(event.target?.closest?.("#reader-page-body")),
+  };
 }
 
 function handleTouchEnd(event) {
@@ -952,8 +961,18 @@ function handleTouchEnd(event) {
   if (!touch || !state.touchStart) {
     return;
   }
+  const selectedText = window.getSelection?.()?.toString().trim() || "";
+  if (state.pendingSelection || state.touchSelectionActive || selectedText.length >= 2) {
+    queueSelectionCapture();
+    state.touchStart = null;
+    return;
+  }
   const dx = touch.clientX - state.touchStart.x;
   const dy = touch.clientY - state.touchStart.y;
+  if (state.touchStart.startedInPageBody && Math.abs(dx) < 24 && Math.abs(dy) < 24) {
+    state.touchStart = null;
+    return;
+  }
   if (Math.abs(dx) > 42 && Math.abs(dx) > Math.abs(dy)) {
     stepReaderPage(dx < 0 ? 1 : -1);
   }
